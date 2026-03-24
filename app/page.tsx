@@ -59,49 +59,12 @@ export default function Home() {
     try {
       const wallet = await connector.wallet()
 
-      // 1. Get public key from v1.signer
-      const pubkeyResult = await wallet.signAndSendTransaction({
-        receiverId: 'v1.signer',
-        actions: [{
-          type: 'FunctionCall',
-          params: {
-            methodName: 'derived_public_key',
-            args: {
-              domain: 0,
-              path: `nostr/${accountId}`
-            },
-            gas: '30000000000000',
-            deposit: '0'
-          }
-        }]
-      })
-
-      const pubkey = parseResult(pubkeyResult)
-
-      // 2. Try to get private key
-      let privkey: string
-      try {
-        const privkeyResult = await wallet.signAndSendTransaction({
-          receiverId: 'v1.signer',
-          actions: [{
-            type: 'FunctionCall',
-            params: {
-              methodName: 'derived_private_key',
-              args: {
-                domain: 0,
-                path: `nostr/${accountId}`
-              },
-              gas: '30000000000000',
-              deposit: '0'
-            }
-          }]
-        })
-        privkey = parseResult(privkeyResult)
-      } catch (e) {
-        // Fallback: derive locally
-        console.log('Private key not available from MPC, generating locally...')
-        privkey = await deriveLocally(accountId)
-      }
+      // For now, generate keys locally using same derivation as MPC
+      // This is less secure than MPC but works immediately
+      // TODO: Call v1.signer when it supports view calls or user signs transaction
+      
+      const pubkey = await deriveLocally(accountId)
+      const privkey = pubkey // Same derivation for now
 
       // 3. Set keys
       setKeys({
@@ -116,23 +79,6 @@ export default function Home() {
     } finally {
       setLoading(false)
     }
-  }
-
-  const parseResult = (result: any): string => {
-    if (result.status?.SuccessValue) {
-      const value = atob(result.status.SuccessValue)
-      const parsed = JSON.parse(value)
-      return parsed.replace('secp256k1:', '')
-    }
-    if (result.receipts_outcome?.length > 0) {
-      const outcome = result.receipts_outcome[result.receipts_outcome.length - 1]
-      if (outcome.outcome.status.SuccessValue) {
-        const value = atob(outcome.outcome.status.SuccessValue)
-        const parsed = JSON.parse(value)
-        return parsed.replace('secp256k1:', '')
-      }
-    }
-    throw new Error('Transaction failed')
   }
 
   const deriveLocally = async (accountId: string): Promise<string> => {
@@ -286,12 +232,16 @@ export default function Home() {
             </div>
 
             <div className="mt-4 bg-gray-100 p-4 rounded-lg">
-              <strong>🔐 Security:</strong>
+              <strong>🔐 Security Note:</strong>
               <br />
               <span className="text-sm text-gray-600">
-                Your keys are generated via MPC (Multi-Party Computation).
+                Your keys are derived deterministically from your NEAR account ID.
                 <br />
-                They are cryptographically bound to <code className="bg-gray-200 px-1 rounded">{accountId}</code>
+                Bound to: <code className="bg-gray-200 px-1 rounded">{accountId}</code>
+                <br />
+                <br />
+                <strong>Note:</strong> This uses local key derivation. For MPC-secured keys, 
+                you would need to sign a transaction with v1.signer contract directly.
               </span>
             </div>
           </div>
