@@ -21,7 +21,7 @@ export default function Home() {
     const conn = new NearConnector({
       signIn: {
         contractId: 'v1.signer',
-        methods: ['derived_public_key', 'sign']
+        methodNames: ['derived_public_key', 'sign']
       }
     })
 
