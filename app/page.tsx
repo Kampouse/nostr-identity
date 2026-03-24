@@ -19,7 +19,10 @@ export default function Home() {
   useEffect(() => {
     // Initialize near-connect
     const conn = new NearConnector({
-      contractId: 'v1.signer',
+      signIn: {
+        contractId: 'v1.signer',
+        methods: ['derived_public_key', 'sign']
+      }
     })
 
     // Listen for sign in
