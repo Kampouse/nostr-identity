@@ -2,8 +2,16 @@
 
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
-import { hexToBytes, bytesToHex } from '@noble/secp256k1'
 import { bech32 } from '@scure/base'
+
+// Helper to convert hex to bytes
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+  }
+  return bytes
+}
 
 export default function Home() {
   const [connector, setConnector] = useState<NearConnector | null>(null)
