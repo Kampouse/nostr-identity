@@ -96,30 +96,41 @@ export default function Home() {
       
       // 1. Create NEP-413 auth request
       const message = `Generate Nostr identity for ${accountId}`
+      const nonce = crypto.randomUUID()
       
-      const authRequest = {
+      // 2. Get NEP-413 signature using signMessage
+      const authResponse = await wallet.signMessage({
         message,
-        nonce: crypto.randomUUID(),
+        nonce: new TextEncoder().encode(nonce),
         recipient: "nostr-identity.near"
-      }
+      })
       
-      // 2. Get NEP-413 signature
-      const authResponse = await wallet.verifyOwner(authRequest)
-      
-      if (!authResponse) {
+      if (!authResponse || !authResponse.signature) {
         throw new Error('Wallet signature required')
       }
       
       console.log('✅ NEP-413 signature obtained')
       
-      // 3. Send to TEE
+      // 3. Format for TEE backend
+      const nep413_response = {
+        account_id: authResponse.accountId,
+        public_key: authResponse.publicKey,
+        signature: authResponse.signature,
+        authRequest: {
+          message,
+          nonce,
+          recipient: "nostr-identity.near"
+        }
+      }
+      
+      // 4. Send to TEE
       const response = await fetch(TEE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'generate',
           account_id: accountId,
-          nep413_response: authResponse
+          nep413_response
         })
       })
       

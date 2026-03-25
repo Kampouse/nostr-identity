@@ -118,10 +118,16 @@ fn verify_nep413_ownership(
         "recipient": nep413_response.auth_request.recipient
     })).map_err(|_| "Failed to serialize message")?;
 
-    // 6. Verify signature
-    // NEAR wallets sign the message bytes directly (not hashed)
+    // 6. Hash the message (NEP-413 spec)
+    // NEAR wallets sign SHA-256 hash of the message, not the raw message
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(message.as_bytes());
+    let message_hash = hasher.finalize();
+
+    // 7. Verify signature against hash
     public_key
-        .verify_strict(message.as_bytes(), &signature)
+        .verify_strict(&message_hash, &signature)
         .map_err(|e| format!("Invalid signature: {}", e))?;
 
     Ok(())
@@ -242,5 +248,27 @@ mod tests {
         // Should be valid hex
         assert!(hex::decode(&pubkey).is_ok());
         assert!(hex::decode(&privkey).is_ok());
+    }
+
+    #[test]
+    fn test_message_hashing() {
+        use sha2::{Sha256, Digest};
+        
+        // Test that message hashing works correctly
+        let message = r#"{"message":"Test message","nonce":"test-nonce","recipient":"nostr-identity.near"}"#;
+        
+        let mut hasher = Sha256::new();
+        hasher.update(message.as_bytes());
+        let hash = hasher.finalize();
+        
+        // Hash should be 32 bytes
+        assert_eq!(hash.len(), 32);
+        
+        // Same message should produce same hash
+        let mut hasher2 = Sha256::new();
+        hasher2.update(message.as_bytes());
+        let hash2 = hasher2.finalize();
+        
+        assert_eq!(hash, hash2);
     }
 }

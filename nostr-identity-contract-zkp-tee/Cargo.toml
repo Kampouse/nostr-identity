@@ -3,6 +3,10 @@ name = "nostr-identity-zkp-tee"
 version = "2.0.0"
 edition = "2021"
 
+[features]
+default = []
+outlayer-tee = []  # Enable OutLayer TEE persistent storage APIs
+
 [[bin]]
 name = "nostr-identity-zkp-tee"
 path = "src/main.rs"
