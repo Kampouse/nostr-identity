@@ -3,39 +3,33 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { bech32 } from '@scure/base'
-import * as secp256k1 from '@noble/secp256k1'
 
-// Helper functions
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+// TEE Backend URL (update after deployment)
+const TEE_URL = process.env.NEXT_PUBLIC_TEE_URL || 'https://p.outlayer.fastnear.com/execute'
+
+// Helper: Convert hex to bytes
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+  }
+  return bytes
 }
 
-async function generateDeterministicKey(accountId: string): Promise<{pubkey: Uint8Array, privkey: Uint8Array}> {
-  // Derive private key from account ID (deterministic)
-  const encoder = new TextEncoder()
-  const seed = encoder.encode(`nostr-identity:${accountId}`)
-  
-  // Hash to get 32-byte private key
-  const hashBuffer = await crypto.subtle.digest('SHA-256', seed)
-  const privKey = new Uint8Array(hashBuffer)
-  
-  // Generate public key (UNCOMPRESSED for Nostr)
-  // Nostr expects 32 bytes (x-coordinate only), not the compressed 33-byte format
-  const pubKeyFull = secp256k1.getPublicKey(privKey, false) // uncompressed = 65 bytes
-  // Take only x and y coordinates (skip the 04 prefix byte)
-  const pubKey = pubKeyFull.slice(1, 65) // 64 bytes = 32 bytes in hex
-  
-  return { pubkey: pubKey, privkey: privKey }
+// Helper: Encode to bech32 (npub/nsec)
+function encodeBech32(prefix: string, hex: string): string {
+  const bytes = hexToBytes(hex)
+  const words = bech32.toWords(bytes)
+  return bech32.encode(prefix, words)
 }
 
-function encodeNpub(pubkey: Uint8Array): string {
-  const words = bech32.toWords(pubkey)
-  return bech32.encode('npub', words)
-}
-
-function encodeNsec(privkey: Uint8Array): string {
-  const words = bech32.toWords(privkey)
-  return bech32.encode('nsec', words)
+// TEE API response types
+interface TeeResponse {
+  success: boolean
+  npub?: string
+  nsec?: string
+  created_at?: number
+  error?: string
 }
 
 export default function Home() {
@@ -43,23 +37,18 @@ export default function Home() {
   const [accountId, setAccountId] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [keys, setKeys] = useState<{
+  
+  // Identity state
+  const [identity, setIdentity] = useState<{
     npub: string
     nsec: string
-    pubkeyHex: string
+    npubBech32: string
+    nsecBech32: string
+    createdAt: number
   } | null>(null)
+  
   const [showKey, setShowKey] = useState(false)
   const [copied, setCopied] = useState<string>('')
-  
-  // Verification state
-  const [verifyMode, setVerifyMode] = useState(false)
-  const [verifyAccountId, setVerifyAccountId] = useState('')
-  const [verifyNpub, setVerifyNpub] = useState('')
-  const [verifyResult, setVerifyResult] = useState<{
-    verified: boolean
-    message: string
-  } | null>(null)
-  const [verifying, setVerifying] = useState(false)
 
   useEffect(() => {
     const init = async () => {
@@ -77,7 +66,7 @@ export default function Home() {
 
       conn.on('wallet:signOut', async () => {
         setAccountId('')
-        setKeys(null)
+        setIdentity(null)
       })
 
       setConnector(conn)
@@ -95,110 +84,72 @@ export default function Home() {
     await connector.disconnect()
   }
 
-  const createIdentity = async () => {
+  // Generate identity using TEE
+  const generateIdentity = async () => {
     if (!accountId || !connector) return
 
     setLoading(true)
     setError('')
 
     try {
-      // 1. Request wallet signature to prove ownership
       const wallet = await connector.wallet()
+      
+      // 1. Create NEP-413 auth request
       const message = `Generate Nostr identity for ${accountId}`
       
-      // This prompts user to sign - proves they control the account
-      const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
-      const signResult = await wallet.signMessage({ 
+      const authRequest = {
         message,
-        recipient: 'nostr-identity.near',
-        nonce
-      })
+        nonce: crypto.randomUUID(),
+        recipient: "nostr-identity.near"
+      }
       
-      if (!signResult) {
+      // 2. Get NEP-413 signature
+      const authResponse = await wallet.verifyOwner(authRequest)
+      
+      if (!authResponse) {
         throw new Error('Wallet signature required')
       }
       
-      console.log('Signature verified ✅')
+      console.log('✅ NEP-413 signature obtained')
       
-      // 2. Generate deterministic key (signature is just for auth, not derivation)
-      // This ensures same account = same npub every time
-      const { pubkey, privkey } = await generateDeterministicKey(accountId)
+      // 3. Send to TEE
+      const response = await fetch(TEE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'generate',
+          account_id: accountId,
+          nep413_response: authResponse
+        })
+      })
       
+      const data: TeeResponse = await response.json()
       
-      // 3. Encode to Nostr format
-      const npub = encodeNpub(pubkey)
-      const nsec = encodeNsec(privkey)
-      const pubkeyHex = bytesToHex(pubkey)
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to create identity')
+      }
       
-      setKeys({ npub, nsec, pubkeyHex })
+      if (!data.npub || !data.nsec) {
+        throw new Error('Invalid response from TEE')
+      }
+      
+      // 4. Encode to bech32
+      const npubBech32 = encodeBech32('npub', data.npub)
+      const nsecBech32 = encodeBech32('nsec', data.nsec)
+      
+      setIdentity({
+        npub: data.npub,
+        nsec: data.nsec,
+        npubBech32,
+        nsecBech32,
+        createdAt: data.created_at || Date.now()
+      })
       
     } catch (err: any) {
-      setError(err.message || 'Failed to create identity')
+      setError(err.message || 'Failed to generate identity')
       console.error(err)
     } finally {
       setLoading(false)
-    }
-  }
-  
-  const verifyIdentity = async () => {
-    if (!verifyAccountId || !verifyNpub) {
-      setVerifyResult({
-        verified: false,
-        message: 'Please enter both NEAR account and npub'
-      })
-      return
-    }
-    
-    if (!connector) {
-      setVerifyResult({
-        verified: false,
-        message: 'Please connect wallet first'
-      })
-      return
-    }
-    
-    setVerifying(true)
-    setVerifyResult(null)
-    
-    try {
-      const wallet = await connector.wallet()
-      
-      // Request signature to verify
-      const message = `Verify Nostr identity for ${verifyAccountId}`
-      const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
-      const signResult = await wallet.signMessage({
-        message,
-        recipient: 'nostr-identity.near',
-        nonce
-      })
-      
-      if (!signResult) {
-        throw new Error('Signature required for verification')
-      }
-      
-      console.log('Signature verified ✅')
-      
-      // Regenerate the expected npub (deterministic, not using signature)
-      const { pubkey } = await generateDeterministicKey(verifyAccountId)
-      const expectedNpub = encodeNpub(pubkey)
-      
-      // Compare
-      const verified = expectedNpub === verifyNpub
-      
-      setVerifyResult({
-        verified,
-        message: verified
-          ? `✅ Verified! This npub belongs to ${verifyAccountId}`
-          : `❌ Verification failed. This npub does not match ${verifyAccountId}`
-      })
-      
-    } catch (err: any) {
-      setVerifyResult({
-        verified: false,
-        message: `Verification error: ${err.message}`
-      })
-    } finally {
-      setVerifying(false)
     }
   }
 
@@ -212,11 +163,24 @@ export default function Home() {
     <main className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-indigo-600 to-purple-600">
       <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-2xl w-full">
         <h1 className="text-4xl font-bold mb-2 text-gray-900">
-          🔑 NEAR → Nostr Identity
+          🔐 Secure NEAR → Nostr Identity
         </h1>
         <p className="text-gray-600 mb-8">
-          Secure identity generation with wallet signature verification
+          Forgery-proof • TEE-Secured
         </p>
+
+        {/* Security Badge */}
+        <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-6">
+          <div className="flex items-center">
+            <span className="text-2xl mr-3">🔒</span>
+            <div>
+              <p className="font-semibold text-green-900">2-Layer Security</p>
+              <p className="text-sm text-green-700">
+                NEP-413 verification + TEE random key generation
+              </p>
+            </div>
+          </div>
+        </div>
 
         {/* Step 1: Connect */}
         <div className="bg-gray-50 rounded-xl p-6 mb-6">
@@ -249,8 +213,8 @@ export default function Home() {
           )}
         </div>
 
-        {/* Step 2: Create Identity */}
-        {accountId && !keys && (
+        {/* Step 2: Generate */}
+        {accountId && !identity && (
           <div className="bg-gray-50 rounded-xl p-6 mb-6">
             <div className="flex items-center mb-4">
               <span className="bg-indigo-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold mr-3">
@@ -260,12 +224,21 @@ export default function Home() {
             </div>
 
             <p className="text-gray-600 mb-4">
-              <strong>🔒 Security:</strong> Requires wallet signature to prove you own this NEAR account.
-              Only the account holder can generate the Nostr identity.
+              <strong>🔒 Security:</strong> Uses NEP-413 standard authentication.
+              Only you can generate your identity.
             </p>
 
+            <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded mb-4">
+              <strong>⚠️ Important:</strong>
+              <br />
+              <span className="text-sm">
+                This version does NOT store keys. You MUST save your private key (nsec) 
+                when shown - it cannot be recovered!
+              </span>
+            </div>
+
             <button
-              onClick={createIdentity}
+              onClick={generateIdentity}
               disabled={loading}
               className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
             >
@@ -281,7 +254,7 @@ export default function Home() {
         )}
 
         {/* Step 3: Show Keys */}
-        {keys && (
+        {identity && (
           <div className="bg-gray-50 rounded-xl p-6 mb-6">
             <div className="flex items-center mb-4">
               <span className="bg-indigo-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold mr-3">
@@ -291,16 +264,16 @@ export default function Home() {
             </div>
 
             <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-4">
-              ✅ Identity generated with signature verification!
+              ✅ Identity generated with NEP-413 verification!
             </div>
 
             {/* Public Key */}
             <div className="mb-4">
               <p className="text-sm text-gray-600 mb-1">Public Key (npub):</p>
               <div className="bg-gray-900 text-green-400 p-3 rounded-lg font-mono text-sm break-all relative">
-                {keys.npub}
+                {identity.npubBech32}
                 <button
-                  onClick={() => copyToClipboard(keys.npub, 'npub')}
+                  onClick={() => copyToClipboard(identity.npubBech32, 'npub')}
                   className="absolute top-2 right-2 bg-gray-700 text-white px-3 py-1 rounded text-xs hover:bg-gray-600"
                 >
                   {copied === 'npub' ? 'Copied!' : 'Copy'}
@@ -309,17 +282,19 @@ export default function Home() {
             </div>
 
             {/* Warning */}
-            <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded mb-4">
-              <strong>⚠️ Keep your private key secret!</strong>
+            <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded mb-4">
+              <strong>🔴 SAVE YOUR PRIVATE KEY NOW!</strong>
               <br />
-              Save this nsec securely. It will not be shown again.
+              <span className="text-sm">
+                This key cannot be recovered. Write it down or store it securely.
+              </span>
             </div>
 
             {/* Private Key */}
             <div className="mb-4">
               <p className="text-sm text-gray-600 mb-1">Private Key (nsec):</p>
               <div className="bg-gray-900 text-green-400 p-3 rounded-lg font-mono text-sm break-all relative">
-                {showKey ? keys.nsec : '••••••••••••••••••••••••••••••••'}
+                {showKey ? identity.nsecBech32 : '••••••••••••••••••••••••••••••••'}
                 <button
                   onClick={() => setShowKey(!showKey)}
                   className="absolute top-2 right-2 bg-gray-700 text-white px-3 py-1 rounded text-xs hover:bg-gray-600"
@@ -328,7 +303,7 @@ export default function Home() {
                 </button>
               </div>
               <button
-                onClick={() => copyToClipboard(keys.nsec, 'nsec')}
+                onClick={() => copyToClipboard(identity.nsecBech32, 'nsec')}
                 className="w-full mt-2 bg-indigo-600 text-white py-2 px-4 rounded-lg font-semibold hover:bg-indigo-700 transition-colors"
               >
                 {copied === 'nsec' ? 'Copied!' : 'Copy Private Key'}
@@ -351,76 +326,29 @@ export default function Home() {
               <strong>🔐 Security Model:</strong>
               <br />
               <span className="text-sm text-gray-600">
-                Your keys are derived from your NEAR account + wallet signature.
+                Your keys are generated inside a TEE (Trusted Execution Environment).
                 <br />
                 <br />
-                ✅ Only YOU can generate this identity (requires your wallet signature)
+                ✅ Only YOU can generate this identity (requires wallet signature)
                 <br />
-                ✅ One Nostr identity per NEAR account (enforced by signature)
+                ✅ Keys are random (not derived from public data)
                 <br />
-                ✅ Keys never leave your device
+                ✅ Forgery-proof (NEP-413 verification)
+                <br />
+                ⚠️ NOT recoverable - you must save your key!
               </span>
             </div>
           </div>
         )}
 
-        {/* Verification Section */}
-        <div className="bg-gray-50 rounded-xl p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold">🔍 Verify Identity</h2>
-            <button
-              onClick={() => setVerifyMode(!verifyMode)}
-              className="text-indigo-600 hover:underline text-sm"
-            >
-              {verifyMode ? 'Cancel' : 'Verify an npub'}
-            </button>
-          </div>
-          
-          {verifyMode && (
-            <div className="space-y-4">
-              <p className="text-gray-600 text-sm">
-                Verify that a Nostr public key belongs to a NEAR account
-              </p>
-              
-              <input
-                type="text"
-                placeholder="NEAR account (e.g., kampouse.near)"
-                value={verifyAccountId}
-                onChange={(e) => setVerifyAccountId(e.target.value)}
-                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              />
-              
-              <input
-                type="text"
-                placeholder="Nostr public key (npub1...)"
-                value={verifyNpub}
-                onChange={(e) => setVerifyNpub(e.target.value)}
-                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono text-sm"
-              />
-              
-              <button
-                onClick={verifyIdentity}
-                disabled={verifying || !verifyAccountId || !verifyNpub}
-                className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
-              >
-                {verifying ? 'Verifying...' : 'Verify Identity'}
-              </button>
-              
-              {verifyResult && (
-                <div className={`p-4 rounded-lg ${verifyResult.verified ? 'bg-green-50 border-l-4 border-green-500' : 'bg-red-50 border-l-4 border-red-500'}`}>
-                  <p className={verifyResult.verified ? 'text-green-900' : 'text-red-900'}>
-                    {verifyResult.message}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
         <div className="text-center text-gray-500 text-sm">
           Powered by{' '}
           <a href="https://near.org" target="_blank" className="text-indigo-600 hover:underline">
             NEAR
+          </a>
+          {' + '}
+          <a href="https://outlayer.fastnear.com" target="_blank" className="text-indigo-600 hover:underline">
+            OutLayer TEE
           </a>
         </div>
       </div>
