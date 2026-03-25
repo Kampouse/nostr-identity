@@ -91,6 +91,8 @@ export default function Home() {
       // Parse the public key from result
       const pubkey = parseResult(pubkeyResult)
       
+      console.log('Got pubkey from v1.signer:', pubkey)
+      
       // 2. For private key, we can't get it from MPC
       // User must sign events via v1.signer.sign() each time
       // OR we derive locally with same seed (less secure but usable)
@@ -113,36 +115,77 @@ export default function Home() {
   
   const parseResult = (result: any): string => {
     // Parse NEAR transaction result
-    if (result.status?.SuccessValue) {
-      const value = atob(result.status.SuccessValue)
-      return JSON.parse(value).replace('secp256k1:', '')
-    }
-    if (result.receipts_outcome?.length > 0) {
-      const outcome = result.receipts_outcome[result.receipts_outcome.length - 1]
-      if (outcome.outcome.status.SuccessValue) {
-        const value = atob(outcome.outcome.status.SuccessValue)
-        return JSON.parse(value).replace('secp256k1:', '')
+    // NEAR returns results as base64-encoded bytes array
+    try {
+      let successValue: string | undefined
+      
+      if (result.status?.SuccessValue) {
+        successValue = result.status.SuccessValue
+      } else if (result.receipts_outcome?.length > 0) {
+        const outcome = result.receipts_outcome[result.receipts_outcome.length - 1]
+        if (outcome.outcome.status.SuccessValue) {
+          successValue = outcome.outcome.status.SuccessValue
+        }
       }
+      
+      if (!successValue) {
+        throw new Error('Transaction failed - no success value')
+      }
+      
+      // Decode base64
+      const decoded = atob(successValue)
+      
+      // Try to parse as JSON first (might be array of bytes)
+      try {
+        const parsed = JSON.parse(decoded)
+        
+        // If it's an array of bytes, convert to string
+        if (Array.isArray(parsed)) {
+          const bytes = new Uint8Array(parsed)
+          const str = new TextDecoder().decode(bytes)
+          return str.replace('secp256k1:', '')
+        }
+        
+        // If it's already a string
+        if (typeof parsed === 'string') {
+          return parsed.replace('secp256k1:', '')
+        }
+        
+        return String(parsed)
+      } catch {
+        // If JSON parse fails, it's already a string
+        return decoded.replace('secp256k1:', '')
+      }
+    } catch (err) {
+      console.error('Failed to parse result:', err)
+      throw new Error('Failed to parse transaction result')
     }
-    throw new Error('Transaction failed - check wallet for details')
   }
   
   const hexToNpub = (pubkey: string): string => {
     // v1.signer returns "secp256k1:BASE58..."
     // Need to decode base58 to bytes, then encode to npub
     try {
+      if (!pubkey || pubkey.length < 10) {
+        throw new Error('Pubkey too short or empty')
+      }
+      
       // Remove "secp256k1:" prefix if present
       const base58Key = pubkey.replace('secp256k1:', '')
       
+      console.log('Decoding base58 key:', base58Key)
+      
       // Decode base58 to bytes
       const bytes = bs58.decode(base58Key)
+      
+      console.log('Decoded bytes length:', bytes.length)
       
       // Encode to npub using bech32
       const words = bech32.toWords(bytes)
       return bech32.encode('npub', words)
     } catch (e) {
-      console.error('Failed to encode npub:', e)
-      return 'Invalid pubkey'
+      console.error('Failed to encode npub:', e, 'Input:', pubkey)
+      return `Error: ${e instanceof Error ? e.message : 'Unknown error'}`
     }
   }
   
