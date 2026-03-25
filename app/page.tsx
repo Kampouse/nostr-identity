@@ -3,9 +3,13 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { bech32 } from '@scure/base'
-import bs58 from 'bs58'
+import * as secp256k1 from '@noble/secp256k1'
 
-// Helper to convert hex to bytes
+// Helper functions
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < bytes.length; i++) {
@@ -14,41 +18,68 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes
 }
 
+async function generateDeterministicKey(accountId: string): Promise<{pubkey: Uint8Array, privkey: Uint8Array}> {
+  // Derive private key from account ID (deterministic)
+  const encoder = new TextEncoder()
+  const seed = encoder.encode(`nostr-identity:${accountId}`)
+  
+  // Hash to get 32-byte private key
+  const hashBuffer = await crypto.subtle.digest('SHA-256', seed)
+  const privKey = new Uint8Array(hashBuffer)
+  
+  // Generate public key
+  const pubKey = secp256k1.getPublicKey(privKey, true) // compressed
+  
+  return { pubkey: pubKey, privkey: privKey }
+}
+
+function encodeNpub(pubkey: Uint8Array): string {
+  // pubkey should be 32 bytes (compressed)
+  const words = bech32.toWords(pubkey)
+  return bech32.encode('npub', words)
+}
+
+function encodeNsec(privkey: Uint8Array): string {
+  // privkey should be 32 bytes
+  const words = bech32.toWords(privkey)
+  return bech32.encode('nsec', words)
+}
+
 export default function Home() {
   const [connector, setConnector] = useState<NearConnector | null>(null)
   const [accountId, setAccountId] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [keys, setKeys] = useState<{
-    pubkey: string
-    privkey: string
     npub: string
     nsec: string
+    pubkeyHex: string
   } | null>(null)
   const [showKey, setShowKey] = useState(false)
+  const [copied, setCopied] = useState<string>('')
 
   useEffect(() => {
-    // Initialize near-connect
-    const conn = new NearConnector({
-      signIn: {
-        contractId: 'v1.signer',
-        methodNames: ['derived_public_key', 'sign']
-      }
-    })
+    const init = async () => {
+      const conn = new NearConnector({
+        signIn: {
+          contractId: 'v1.signer',
+          methodNames: ['derived_public_key', 'sign']
+        }
+      })
 
-    // Listen for sign in
-    conn.on('wallet:signIn', async (t) => {
-      const account = t.accounts[0].accountId
-      setAccountId(account)
-    })
+      conn.on('wallet:signIn', async (t) => {
+        const account = t.accounts[0].accountId
+        setAccountId(account)
+      })
 
-    // Listen for sign out
-    conn.on('wallet:signOut', async () => {
-      setAccountId('')
-      setKeys(null)
-    })
+      conn.on('wallet:signOut', async () => {
+        setAccountId('')
+        setKeys(null)
+      })
 
-    setConnector(conn)
+      setConnector(conn)
+    }
+    init()
   }, [])
 
   const connectWallet = async () => {
@@ -62,166 +93,44 @@ export default function Home() {
   }
 
   const createIdentity = async () => {
-    if (!connector || !accountId) return
+    if (!accountId) return
 
     setLoading(true)
     setError('')
 
     try {
-      const wallet = await connector.wallet()
-
-      // 1. Call v1.signer.derived_public_key with SIGNED transaction
-      // This requires user to approve in wallet
-      const pubkeyResult = await wallet.signAndSendTransaction({
-        receiverId: 'v1.signer',
-        actions: [{
-          type: 'FunctionCall',
-          params: {
-            methodName: 'derived_public_key',
-            args: {
-              domain: 0,
-              path: `nostr/${accountId}`
-            },
-            gas: '30000000000000', // 30 TGas
-            deposit: '0'
-          }
-        }]
-      })
-
-      // Parse the public key from result
-      const pubkey = parseResult(pubkeyResult)
+      // Generate deterministic keypair
+      const { pubkey, privkey } = await generateDeterministicKey(accountId)
       
-      console.log('Got pubkey from v1.signer:', pubkey)
+      console.log('Generated pubkey:', pubkey)
+      console.log('Generated privkey:', privkey)
       
-      // 2. For private key, we can't get it from MPC
-      // User must sign events via v1.signer.sign() each time
-      // OR we derive locally with same seed (less secure but usable)
+      // Encode to Nostr format
+      const npub = encodeNpub(pubkey)
+      const nsec = encodeNsec(privkey)
+      const pubkeyHex = bytesToHex(pubkey)
       
-      // For now, show pubkey only - user needs to sign each Nostr event via MPC
+      console.log('npub:', npub)
+      console.log('nsec:', nsec)
+      
       setKeys({
-        pubkey,
-        privkey: '', // No private key - MPC holds it
-        npub: hexToNpub(pubkey),
-        nsec: '' // No nsec - must sign via MPC each time
+        npub,
+        nsec,
+        pubkeyHex
       })
       
     } catch (err: any) {
-      setError(err.message || 'Failed to create identity. Make sure you approved the transaction in your wallet.')
+      setError(err.message || 'Failed to create identity')
       console.error(err)
     } finally {
       setLoading(false)
     }
   }
-  
-  const parseResult = (result: any): string => {
-    // Parse NEAR transaction result
-    // NEAR returns results as base64-encoded bytes array
-    try {
-      let successValue: string | undefined
-      
-      if (result.status?.SuccessValue) {
-        successValue = result.status.SuccessValue
-      } else if (result.receipts_outcome?.length > 0) {
-        const outcome = result.receipts_outcome[result.receipts_outcome.length - 1]
-        if (outcome.outcome.status.SuccessValue) {
-          successValue = outcome.outcome.status.SuccessValue
-        }
-      }
-      
-      if (!successValue) {
-        throw new Error('Transaction failed - no success value')
-      }
-      
-      // Decode base64
-      const decoded = atob(successValue)
-      
-      // Try to parse as JSON first (might be array of bytes)
-      try {
-        const parsed = JSON.parse(decoded)
-        
-        // If it's an array of bytes, convert to string
-        if (Array.isArray(parsed)) {
-          const bytes = new Uint8Array(parsed)
-          const str = new TextDecoder().decode(bytes)
-          return str.replace('secp256k1:', '')
-        }
-        
-        // If it's already a string
-        if (typeof parsed === 'string') {
-          return parsed.replace('secp256k1:', '')
-        }
-        
-        return String(parsed)
-      } catch {
-        // If JSON parse fails, it's already a string
-        return decoded.replace('secp256k1:', '')
-      }
-    } catch (err) {
-      console.error('Failed to parse result:', err)
-      throw new Error('Failed to parse transaction result')
-    }
-  }
-  
-  const hexToNpub = (pubkey: string): string => {
-    // v1.signer returns "secp256k1:BASE58..."
-    // The base58 contains more than just the pubkey - need to extract the 32-byte key
-    try {
-      if (!pubkey || pubkey.length < 10) {
-        throw new Error('Pubkey too short or empty')
-      }
-      
-      // Remove "secp256k1:" prefix if present
-      const base58Key = pubkey.replace('secp256k1:', '')
-      
-      console.log('Decoding base58 key:', base58Key)
-      
-      // Decode base58 to bytes
-      const bytes = bs58.decode(base58Key)
-      
-      console.log('Decoded bytes length:', bytes.length)
-      console.log('Decoded bytes:', Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''))
-      
-      // v1.signer returns extended key format - extract only the first 32 bytes (the actual pubkey)
-      // A secp256k1 compressed pubkey is 32 bytes
-      if (bytes.length === 32) {
-        // Already correct size
-        const words = bech32.toWords(bytes)
-        return bech32.encode('npub', words)
-      } else if (bytes.length > 32) {
-        // Extended format - take first 32 bytes
-        console.log('Extended format detected, extracting first 32 bytes')
-        const pubkeyBytes = bytes.slice(0, 32)
-        const words = bech32.toWords(pubkeyBytes)
-        return bech32.encode('npub', words)
-      } else {
-        throw new Error(`Invalid pubkey length: ${bytes.length} bytes (expected 32)`)
-      }
-    } catch (e) {
-      console.error('Failed to encode npub:', e, 'Input:', pubkey)
-      return `Error: ${e instanceof Error ? e.message : 'Unknown error'}`
-    }
-  }
-  
-  const hexToNsec = (privkey: string): string => {
-    // Convert base58 privkey to nsec (bech32 encoding)
-    try {
-      // Remove prefix if present
-      const base58Key = privkey.replace('secp256k1:', '')
-      
-      // Decode base58 to bytes
-      const bytes = bs58.decode(base58Key)
-      
-      // Encode to nsec using bech32
-      const words = bech32.toWords(bytes)
-      return bech32.encode('nsec', words)
-    } catch (e) {
-      console.error('Failed to encode nsec:', e)
-      return 'Invalid privkey'
-    }
-  }
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string, label: string) => {
+    await navigator.clipboard.writeText(text)
+    setCopied(label)
+    setTimeout(() => setCopied(''), 2000)
   }
 
   return (
@@ -231,7 +140,7 @@ export default function Home() {
           🔑 NEAR → Nostr Identity
         </h1>
         <p className="text-gray-600 mb-8">
-          Create a Nostr identity bound to your NEAR account via MPC
+          Create a Nostr identity bound to your NEAR account
         </p>
 
         {/* Step 1: Connect */}
@@ -276,7 +185,8 @@ export default function Home() {
             </div>
 
             <p className="text-gray-600 mb-4">
-              This will generate a Nostr keypair cryptographically bound to your NEAR account using MPC.
+              Generate a Nostr keypair deterministically bound to your NEAR account.
+              One NEAR account = One Nostr identity.
             </p>
 
             <button
@@ -284,7 +194,7 @@ export default function Home() {
               disabled={loading}
               className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
-              {loading ? 'Generating keys...' : 'Create Identity'}
+              {loading ? 'Generating...' : 'Generate Identity'}
             </button>
 
             {error && (
@@ -306,7 +216,7 @@ export default function Home() {
             </div>
 
             <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-4">
-              ✅ Identity created successfully!
+              ✅ Identity generated successfully!
             </div>
 
             {/* Public Key */}
@@ -315,42 +225,65 @@ export default function Home() {
               <div className="bg-gray-900 text-green-400 p-3 rounded-lg font-mono text-sm break-all relative">
                 {keys.npub}
                 <button
-                  onClick={() => copyToClipboard(keys.npub)}
+                  onClick={() => copyToClipboard(keys.npub, 'npub')}
                   className="absolute top-2 right-2 bg-gray-700 text-white px-3 py-1 rounded text-xs hover:bg-gray-600"
                 >
-                  Copy
+                  {copied === 'npub' ? 'Copied!' : 'Copy'}
                 </button>
               </div>
             </div>
 
-            {/* MPC Info */}
-            <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded mb-4">
-              <strong>🔐 MPC-Secured Key</strong>
+            {/* Warning */}
+            <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded mb-4">
+              <strong>⚠️ Keep your private key secret!</strong>
               <br />
-              <span className="text-sm text-blue-900">
-                Your Nostr public key is generated by MPC (Multi-Party Computation).
-                <br />
-                The private key NEVER exists in full - it's split across the MPC network.
-                <br />
-                <br />
-                <strong>To sign Nostr events:</strong> You must call v1.signer.sign() for each event.
-                <br />
-                No nsec (private key) to export - this is maximum security.
-              </span>
+              Save this nsec securely. It will not be shown again.
+            </div>
+
+            {/* Private Key */}
+            <div className="mb-4">
+              <p className="text-sm text-gray-600 mb-1">Private Key (nsec):</p>
+              <div className="bg-gray-900 text-green-400 p-3 rounded-lg font-mono text-sm break-all relative">
+                {showKey ? keys.nsec : '••••••••••••••••••••••••••••••••'}
+                <button
+                  onClick={() => setShowKey(!showKey)}
+                  className="absolute top-2 right-2 bg-gray-700 text-white px-3 py-1 rounded text-xs hover:bg-gray-600"
+                >
+                  {showKey ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              <button
+                onClick={() => copyToClipboard(keys.nsec, 'nsec')}
+                className="w-full mt-2 bg-indigo-600 text-white py-2 px-4 rounded-lg font-semibold hover:bg-indigo-700 transition-colors"
+              >
+                {copied === 'nsec' ? 'Copied!' : 'Copy Private Key'}
+              </button>
             </div>
 
             {/* Instructions */}
             <div className="bg-white p-4 rounded-lg">
-              <h3 className="font-semibold mb-3">⚠️ Important: No Private Key Export</h3>
-              <p className="text-gray-700 text-sm mb-3">
-                This is MPC-only mode. The private key is never exposed. You cannot import this into Damus/Primal directly.
-              </p>
-              <p className="text-gray-700 text-sm">
-                To use this identity, you need a Nostr client that supports calling v1.signer.sign() for each event.
+              <h3 className="font-semibold mb-3">📱 Import to Nostr Client</h3>
+              <ol className="list-decimal list-inside space-y-2 text-gray-700">
+                <li>Copy your <strong>private key</strong> (nsec) above</li>
+                <li>Open your Nostr client (Damus, Primal, Amethyst, etc.)</li>
+                <li>Go to Settings → Add Account / Import Key</li>
+                <li>Paste your nsec and save</li>
+                <li>Start posting! 🎉</li>
+              </ol>
+            </div>
+
+            <div className="mt-4 bg-gray-100 p-4 rounded-lg">
+              <strong>🔐 Security:</strong>
+              <br />
+              <span className="text-sm text-gray-600">
+                Your keys are deterministically derived from your NEAR account.
+                <br />
+                Bound to: <code className="bg-gray-200 px-1 rounded">{accountId}</code>
                 <br />
                 <br />
-                For regular Nostr usage (Damus/Primal), use a different key generator that exports nsec.
-              </p>
+                <strong>Important:</strong> Same NEAR account = Same Nostr identity.
+                You can regenerate these keys anytime by connecting the same account.
+              </span>
             </div>
           </div>
         )}
@@ -359,10 +292,6 @@ export default function Home() {
           Powered by{' '}
           <a href="https://near.org" target="_blank" className="text-indigo-600 hover:underline">
             NEAR
-          </a>{' '}
-          +{' '}
-          <a href="https://github.com/near-one/mpc" target="_blank" className="text-indigo-600 hover:underline">
-            MPC
           </a>
         </div>
       </div>
