@@ -46,6 +46,16 @@ export default function Home() {
   } | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [copied, setCopied] = useState<string>('')
+  
+  // Verification state
+  const [verifyMode, setVerifyMode] = useState(false)
+  const [verifyAccountId, setVerifyAccountId] = useState('')
+  const [verifyNpub, setVerifyNpub] = useState('')
+  const [verifyResult, setVerifyResult] = useState<{
+    verified: boolean
+    message: string
+  } | null>(null)
+  const [verifying, setVerifying] = useState(false)
 
   useEffect(() => {
     const init = async () => {
@@ -123,6 +133,68 @@ export default function Home() {
       console.error(err)
     } finally {
       setLoading(false)
+    }
+  }
+  
+  const verifyIdentity = async () => {
+    if (!verifyAccountId || !verifyNpub) {
+      setVerifyResult({
+        verified: false,
+        message: 'Please enter both NEAR account and npub'
+      })
+      return
+    }
+    
+    if (!connector) {
+      setVerifyResult({
+        verified: false,
+        message: 'Please connect wallet first'
+      })
+      return
+    }
+    
+    setVerifying(true)
+    setVerifyResult(null)
+    
+    try {
+      const wallet = await connector.wallet()
+      
+      // Request signature to verify
+      const message = `Verify Nostr identity for ${verifyAccountId}`
+      const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
+      const signResult = await wallet.signMessage({
+        message,
+        recipient: 'nostr-identity.near',
+        nonce
+      })
+      
+      if (!signResult) {
+        throw new Error('Signature required for verification')
+      }
+      
+      const signature = typeof signResult === 'string' ? signResult : (signResult as any).signature || JSON.stringify(signResult)
+      
+      // Regenerate the expected npub
+      const { pubkey } = await generateSecureKey(verifyAccountId, signature)
+      const expectedNpub = encodeNpub(pubkey)
+      
+      // Compare
+      const verified = expectedNpub === verifyNpub
+      
+      setVerifyResult({
+        verified,
+        message: verified
+          ? `✅ Verified! This npub belongs to ${verifyAccountId}`
+          : `❌ Verification failed. This npub does not match ${verifyAccountId}`
+      })
+      
+    } catch (err: any) {
+      setVerifyResult({
+        verified: false,
+        message: `Verification error: ${err.message}`
+      })
+    } finally {
+      setVerifying(false)
     }
   }
 
@@ -287,6 +359,59 @@ export default function Home() {
             </div>
           </div>
         )}
+
+        {/* Verification Section */}
+        <div className="bg-gray-50 rounded-xl p-6 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">🔍 Verify Identity</h2>
+            <button
+              onClick={() => setVerifyMode(!verifyMode)}
+              className="text-indigo-600 hover:underline text-sm"
+            >
+              {verifyMode ? 'Cancel' : 'Verify an npub'}
+            </button>
+          </div>
+          
+          {verifyMode && (
+            <div className="space-y-4">
+              <p className="text-gray-600 text-sm">
+                Verify that a Nostr public key belongs to a NEAR account
+              </p>
+              
+              <input
+                type="text"
+                placeholder="NEAR account (e.g., kampouse.near)"
+                value={verifyAccountId}
+                onChange={(e) => setVerifyAccountId(e.target.value)}
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+              
+              <input
+                type="text"
+                placeholder="Nostr public key (npub1...)"
+                value={verifyNpub}
+                onChange={(e) => setVerifyNpub(e.target.value)}
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono text-sm"
+              />
+              
+              <button
+                onClick={verifyIdentity}
+                disabled={verifying || !verifyAccountId || !verifyNpub}
+                className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
+              >
+                {verifying ? 'Verifying...' : 'Verify Identity'}
+              </button>
+              
+              {verifyResult && (
+                <div className={`p-4 rounded-lg ${verifyResult.verified ? 'bg-green-50 border-l-4 border-green-500' : 'bg-red-50 border-l-4 border-red-500'}`}>
+                  <p className={verifyResult.verified ? 'text-green-900' : 'text-red-900'}>
+                    {verifyResult.message}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="text-center text-gray-500 text-sm">
           Powered by{' '}
