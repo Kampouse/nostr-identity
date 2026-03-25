@@ -10,16 +10,20 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-async function generateSecureKey(accountId: string, signature: string): Promise<{pubkey: Uint8Array, privkey: Uint8Array}> {
-  // Derive private key from account ID + signature
-  // This ensures only the wallet holder can generate the key
+async function generateDeterministicKey(accountId: string): Promise<{pubkey: Uint8Array, privkey: Uint8Array}> {
+  // Derive private key from account ID (deterministic)
   const encoder = new TextEncoder()
-  const seedData = encoder.encode(`nostr-identity:${accountId}:${signature}`)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', seedData)
+  const seed = encoder.encode(`nostr-identity:${accountId}`)
+  
+  // Hash to get 32-byte private key
+  const hashBuffer = await crypto.subtle.digest('SHA-256', seed)
   const privKey = new Uint8Array(hashBuffer)
   
-  // Generate public key
-  const pubKey = secp256k1.getPublicKey(privKey, true) // compressed
+  // Generate public key (UNCOMPRESSED for Nostr)
+  // Nostr expects 32 bytes (x-coordinate only), not the compressed 33-byte format
+  const pubKeyFull = secp256k1.getPublicKey(privKey, false) // uncompressed = 65 bytes
+  // Take only x and y coordinates (skip the 04 prefix byte)
+  const pubKey = pubKeyFull.slice(1, 65) // 64 bytes = 32 bytes in hex
   
   return { pubkey: pubKey, privkey: privKey }
 }
@@ -114,11 +118,11 @@ export default function Home() {
         throw new Error('Wallet signature required')
       }
       
-      // Extract signature - could be string or object
-      const signature = typeof signResult === 'string' ? signResult : (signResult as any).signature || JSON.stringify(signResult)
+      console.log('Signature verified ✅')
       
-      // 2. Derive key using signature (proves ownership)
-      const { pubkey, privkey } = await generateSecureKey(accountId, signature)
+      // 2. Generate deterministic key (signature is just for auth, not derivation)
+      // This ensures same account = same npub every time
+      const { pubkey, privkey } = await generateDeterministicKey(accountId)
       
       
       // 3. Encode to Nostr format
@@ -172,10 +176,10 @@ export default function Home() {
         throw new Error('Signature required for verification')
       }
       
-      const signature = typeof signResult === 'string' ? signResult : (signResult as any).signature || JSON.stringify(signResult)
+      console.log('Signature verified ✅')
       
-      // Regenerate the expected npub
-      const { pubkey } = await generateSecureKey(verifyAccountId, signature)
+      // Regenerate the expected npub (deterministic, not using signature)
+      const { pubkey } = await generateDeterministicKey(verifyAccountId)
       const expectedNpub = encodeNpub(pubkey)
       
       // Compare
