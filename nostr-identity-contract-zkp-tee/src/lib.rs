@@ -1,7 +1,7 @@
 use ark_bn254::{Bn254, Fr};
 use ark_crypto_primitives::snark::SNARK;
 use ark_ff::PrimeField;
-use ark_groth16::{Groth16, Proof, ProvingKey};
+use ark_groth16::{Groth16, ProvingKey};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::CanonicalSerialize;
 use ed25519_dalek::{Signature, VerifyingKey as Ed25519VerifyingKey};
