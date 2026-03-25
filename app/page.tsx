@@ -93,14 +93,23 @@ export default function Home() {
       const message = `Generate Nostr identity for ${accountId}`
       
       // This prompts user to sign - proves they control the account
-      const signature = await wallet.signMessage({ message })
+      const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
+      const signResult = await wallet.signMessage({ 
+        message,
+        recipient: 'nostr-identity.near',
+        nonce
+      })
       
-      if (!signature) {
+      if (!signResult) {
         throw new Error('Wallet signature required')
       }
       
+      // Extract signature - could be string or object
+      const signature = typeof signResult === 'string' ? signResult : (signResult as any).signature || JSON.stringify(signResult)
+      
       // 2. Derive key using signature (proves ownership)
-      const { pubkey, privkey } = await generateSecureKey(accountId, signature.toString())
+      const { pubkey, privkey } = await generateSecureKey(accountId, signature)
+      
       
       // 3. Encode to Nostr format
       const npub = encodeNpub(pubkey)
