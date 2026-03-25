@@ -1,6 +1,6 @@
 [package]
 name = "nostr-identity-zkp-tee"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 
 [[bin]]
@@ -12,10 +12,26 @@ name = "nostr_identity_zkp_tee"
 path = "src/lib.rs"
 
 [dependencies]
+# Crypto
 ed25519-dalek = "2.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
+
+# ZKP (Real zero-knowledge proofs)
+ark-groth16 = "0.4"
+ark-bn254 = "0.4"
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-std = "0.4"
+ark-relations = "0.4"
+ark-r1cs-std = "0.4"
+ark-serialize = "0.4"
+ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree"] }
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Utils
 rand = "0.8"
 hex = "0.4"
 base64 = "0.22"

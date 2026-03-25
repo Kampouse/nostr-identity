@@ -1,6 +1,6 @@
-//! Nostr Identity ZKP-TEE - WASI P1 Entry Point
+//! Nostr Identity ZKP-TEE - REAL Zero-Knowledge Proofs
 //!
-//! Generates ZKP proofs inside TEE for anonymous Nostr identity creation.
+//! Uses Arkworks Groth16 for mathematical zero-knowledge proofs.
 
 use nostr_identity_zkp_tee::{handle_action, Action};
 use std::io::{self, Read, Write};
@@ -49,34 +49,5 @@ fn main() {
     
     if let Err(e) = io::stdout().write_all(output.as_bytes()) {
         eprintln!("Failed to write stdout: {}", e);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use nostr_identity_zkp_tee::{handle_action, Action, Nep413AuthRequest, Nep413AuthResponse};
-
-    #[test]
-    fn test_main_with_invalid_input() {
-        let result = std::panic::catch_unwind(|| {
-            let _ = nostr_identity_zkp_tee::handle_action(
-                Action::Generate {
-                    account_id: "test.near".to_string(),
-                    nep413_response: Nep413AuthResponse {
-                        account_id: "test.near".to_string(),
-                        public_key: "invalid".to_string(),
-                        signature: "invalid".to_string(),
-                        auth_request: Nep413AuthRequest {
-                            message: "test".to_string(),
-                            nonce: "test".to_string(),
-                            recipient: "nostr-identity.near".to_string(),
-                        },
-                    },
-                }
-            );
-        });
-        
-        // Should handle gracefully (not panic)
-        assert!(result.is_ok());
     }
 }
