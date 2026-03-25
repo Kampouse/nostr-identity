@@ -1,0 +1,20 @@
+{
+  "name": "nostr-identity-zkp-client",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "generate": "ts-node generate_identity.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@noble/secp256k1": "^1.7.0",
+    "circomlibjs": "^0.1.7",
+    "snarkjs": "^0.7.0",
+    "@scure/base": "^1.1.0"
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0"
+  }
+}
