@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { bech32 } from '@scure/base'
+import bs58 from 'bs58'
 
 // Helper to convert hex to bytes
 function hexToBytes(hex: string): Uint8Array {
@@ -126,10 +127,17 @@ export default function Home() {
     throw new Error('Transaction failed - check wallet for details')
   }
   
-  const hexToNpub = (hex: string): string => {
-    // Convert hex pubkey to npub (bech32 encoding)
+  const hexToNpub = (pubkey: string): string => {
+    // v1.signer returns "secp256k1:BASE58..."
+    // Need to decode base58 to bytes, then encode to npub
     try {
-      const bytes = hexToBytes(hex)
+      // Remove "secp256k1:" prefix if present
+      const base58Key = pubkey.replace('secp256k1:', '')
+      
+      // Decode base58 to bytes
+      const bytes = bs58.decode(base58Key)
+      
+      // Encode to npub using bech32
       const words = bech32.toWords(bytes)
       return bech32.encode('npub', words)
     } catch (e) {
@@ -138,10 +146,16 @@ export default function Home() {
     }
   }
   
-  const hexToNsec = (hex: string): string => {
-    // Convert hex privkey to nsec (bech32 encoding)
+  const hexToNsec = (privkey: string): string => {
+    // Convert base58 privkey to nsec (bech32 encoding)
     try {
-      const bytes = hexToBytes(hex)
+      // Remove prefix if present
+      const base58Key = privkey.replace('secp256k1:', '')
+      
+      // Decode base58 to bytes
+      const bytes = bs58.decode(base58Key)
+      
+      // Encode to nsec using bech32
       const words = bech32.toWords(bytes)
       return bech32.encode('nsec', words)
     } catch (e) {
