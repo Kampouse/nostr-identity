@@ -164,7 +164,7 @@ export default function Home() {
   
   const hexToNpub = (pubkey: string): string => {
     // v1.signer returns "secp256k1:BASE58..."
-    // Need to decode base58 to bytes, then encode to npub
+    // The base58 contains more than just the pubkey - need to extract the 32-byte key
     try {
       if (!pubkey || pubkey.length < 10) {
         throw new Error('Pubkey too short or empty')
@@ -179,10 +179,23 @@ export default function Home() {
       const bytes = bs58.decode(base58Key)
       
       console.log('Decoded bytes length:', bytes.length)
+      console.log('Decoded bytes:', Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''))
       
-      // Encode to npub using bech32
-      const words = bech32.toWords(bytes)
-      return bech32.encode('npub', words)
+      // v1.signer returns extended key format - extract only the first 32 bytes (the actual pubkey)
+      // A secp256k1 compressed pubkey is 32 bytes
+      if (bytes.length === 32) {
+        // Already correct size
+        const words = bech32.toWords(bytes)
+        return bech32.encode('npub', words)
+      } else if (bytes.length > 32) {
+        // Extended format - take first 32 bytes
+        console.log('Extended format detected, extracting first 32 bytes')
+        const pubkeyBytes = bytes.slice(0, 32)
+        const words = bech32.toWords(pubkeyBytes)
+        return bech32.encode('npub', words)
+      } else {
+        throw new Error(`Invalid pubkey length: ${bytes.length} bytes (expected 32)`)
+      }
     } catch (e) {
       console.error('Failed to encode npub:', e, 'Input:', pubkey)
       return `Error: ${e instanceof Error ? e.message : 'Unknown error'}`
