@@ -93,25 +93,44 @@ export default function Home() {
   }
 
   const createIdentity = async () => {
-    if (!accountId) return
+    if (!accountId || !connector) return
 
     setLoading(true)
     setError('')
 
     try {
-      // Generate deterministic keypair
-      const { pubkey, privkey } = await generateDeterministicKey(accountId)
+      const wallet = await connector.wallet()
       
-      console.log('Generated pubkey:', pubkey)
-      console.log('Generated privkey:', privkey)
+      // 1. Request signature to prove ownership
+      const message = `Generate Nostr identity for ${accountId}`
       
-      // Encode to Nostr format
-      const npub = encodeNpub(pubkey)
-      const nsec = encodeNsec(privkey)
-      const pubkeyHex = bytesToHex(pubkey)
+      // Sign the message with NEAR wallet
+      const signature = await wallet.signMessage({
+        message,
+        recipient: 'nostr-identity.near',
+        nonce: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex')
+      })
       
-      console.log('npub:', npub)
-      console.log('nsec:', nsec)
+      if (!signature || !signature.signature) {
+        throw new Error('Failed to sign message - identity generation cancelled')
+      }
+      
+      // 2. Derive key using signature (proves wallet ownership)
+      const encoder = new TextEncoder()
+      const seedData = encoder.encode(`nostr-identity:${accountId}:${signature.signature}`)
+      const seedBuffer = await crypto.subtle.digest('SHA-256', seedData)
+      const seed = new Uint8Array(seedBuffer)
+      
+      // 3. Generate keypair
+      const privKey = seed
+      const pubKey = secp256k1.getPublicKey(privKey, true)
+      
+      console.log('Generated pubkey with signature proof')
+      
+      // 4. Encode to Nostr format
+      const npub = encodeNpub(pubKey)
+      const nsec = encodeNsec(privKey)
+      const pubkeyHex = bytesToHex(pubKey)
       
       setKeys({
         npub,
@@ -185,8 +204,8 @@ export default function Home() {
             </div>
 
             <p className="text-gray-600 mb-4">
-              Generate a Nostr keypair deterministically bound to your NEAR account.
-              One NEAR account = One Nostr identity.
+              <strong>Secure Generation:</strong> Requires wallet signature to prove you own this NEAR account.
+              Only the account holder can generate the Nostr identity.
             </p>
 
             <button
