@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
+import { hexToBytes, bytesToHex } from '@noble/secp256k1'
+import { bech32 } from '@scure/base'
 
 export default function Home() {
   const [connector, setConnector] = useState<NearConnector | null>(null)
@@ -88,7 +90,7 @@ export default function Home() {
       setKeys({
         pubkey,
         privkey: '', // No private key - MPC holds it
-        npub: 'npub1' + pubkey.substring(0, 58),
+        npub: hexToNpub(pubkey),
         nsec: '' // No nsec - must sign via MPC each time
       })
       
@@ -114,6 +116,30 @@ export default function Home() {
       }
     }
     throw new Error('Transaction failed - check wallet for details')
+  }
+  
+  const hexToNpub = (hex: string): string => {
+    // Convert hex pubkey to npub (bech32 encoding)
+    try {
+      const bytes = hexToBytes(hex)
+      const words = bech32.toWords(bytes)
+      return bech32.encode('npub', words)
+    } catch (e) {
+      console.error('Failed to encode npub:', e)
+      return 'Invalid pubkey'
+    }
+  }
+  
+  const hexToNsec = (hex: string): string => {
+    // Convert hex privkey to nsec (bech32 encoding)
+    try {
+      const bytes = hexToBytes(hex)
+      const words = bech32.toWords(bytes)
+      return bech32.encode('nsec', words)
+    } catch (e) {
+      console.error('Failed to encode nsec:', e)
+      return 'Invalid privkey'
+    }
   }
 
   const copyToClipboard = (text: string) => {
