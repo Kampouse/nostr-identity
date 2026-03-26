@@ -2,35 +2,11 @@
 
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
-import { bech32 } from '@scure/base'
+import { encodeBech32 } from '@nostr-identity/crypto'
+import type { TeeResponse } from '@nostr-identity/types'
 
 // TEE Backend URL (update after deployment)
 const TEE_URL = process.env.NEXT_PUBLIC_TEE_URL || 'https://p.outlayer.fastnear.com/execute'
-
-// Helper: Convert hex to bytes
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
-  }
-  return bytes
-}
-
-// Helper: Encode to bech32 (npub/nsec)
-function encodeBech32(prefix: string, hex: string): string {
-  const bytes = hexToBytes(hex)
-  const words = bech32.toWords(bytes)
-  return bech32.encode(prefix, words)
-}
-
-// TEE API response types
-interface TeeResponse {
-  success: boolean
-  npub?: string
-  nsec?: string
-  created_at?: number
-  error?: string
-}
 
 export default function Home() {
   const [connector, setConnector] = useState<NearConnector | null>(null)

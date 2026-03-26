@@ -1,0 +1,16 @@
+{
+  "name": "@nostr-identity/nostr",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@noble/secp256k1": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
