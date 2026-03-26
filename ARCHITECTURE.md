@@ -25,22 +25,7 @@ This system creates **privacy-preserving Nostr identities** bound to NEAR blockc
                                       │
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          DELEGATOR LAYER (Optional)                         │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────┐       │
-│  │              Delegator Service (TypeScript)                      │       │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │       │
-│  │  │ NEP-413 Verify  │→ │ Batch Register  │→ │ Private DB      │  │       │
-│  │  │ (Off-chain)     │  │ (Gas Savings)   │  │ (Mappings)      │  │       │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │       │
-│  └─────────────────────────────────────────────────────────────────┘       │
-│                                   │                                         │
-└───────────────────────────────────┼─────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          TEE LAYER (Security Core)                          │
+│                          TEE LAYER (OutLayer)                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────┐       │
@@ -53,6 +38,8 @@ This system creates **privacy-preserving Nostr identities** bound to NEAR blockc
 │  │  │  3. ZKP Proof Generation (Groth16)                       │    │       │
 │  │  │  4. Encrypted Storage (CKD - Hardware Keys)              │    │       │
 │  │  │  5. Identity Recovery                                    │    │       │
+│  │  │  6. BUILT-IN DELEGATOR: Signs registrations              │    │       │
+│  │  │     and calls NEAR contract as authorized delegator       │    │       │
 │  │  └─────────────────────────────────────────────────────────┘    │       │
 │  │                           │                                       │       │
 │  │  ┌────────────────────────▼─────────────────────────────────┐    │       │
@@ -77,14 +64,14 @@ This system creates **privacy-preserving Nostr identities** bound to NEAR blockc
 │  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │    │       │
 │  │  │  │ Commitment   │  │ Nullifier    │  │ Delegators   │  │    │       │
 │  │  │  │ Hash (SHA256)│  │ (Prevents    │  │ (Authorized) │  │    │       │
-│  │  │  │              │  │  Double-Reg) │  │              │  │    │       │
+│  │  │  │              │  │  Double-Reg) │  │ (TEE is one) │  │    │       │
 │  │  │  └──────────────┘  └──────────────┘  └──────────────┘  │    │       │
 │  │  │                                                          │    │       │
 │  │  │  NO account_id stored (Privacy!)                         │    │       │
 │  │  └─────────────────────────────────────────────────────────┘    │       │
 │  │                                                                   │       │
 │  │  Methods:                                                          │       │
-│  │  - register_identity(commitment, nullifier)                      │       │
+│  │  - register_via_delegator(commitment, nullifier, delegator_sig)   │       │
 │  │  - verify_identity(commitment)                                    │       │
 │  │  - add_delegator(delegator_id)                                    │       │
 │  │  - remove_delegator(delegator_id)                                 │       │
@@ -162,24 +149,18 @@ sequenceDiagram
     Frontend->>User: "Here's your key"
 ```
 
-### **Delegator Flow (Optional Privacy Layer)**
+### **How the Delegator Works (Built into TEE)**
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant Delegator
-    participant TEE
-    participant Blockchain
+The TEE contract has **built-in delegator functionality**:
 
-    User->>Delegator: NEP-413 Signature
-    Delegator->>Delegator: Verify signature (off-chain)
-    Delegator->>TEE: Batch register request
-    TEE->>TEE: Generate identities
-    TEE->>Blockchain: register_identity() (batch)
+1. User sends NEP-413 signature to TEE
+2. TEE verifies signature and generates identity
+3. **TEE signs the registration as an authorized delegator**
+4. TEE calls `register_via_delegator()` on NEAR smart contract
+5. Smart contract verifies TEE's delegator signature
+6. Commitment/nullifier stored on-chain (no account_id!)
 
-    Note over Blockchain: Only commitment hashes stored
-    Note over User: account_id never on-chain!
-```
+**Note:** There is NO separate delegator service - it's all in the TEE!
 
 ---
 
@@ -317,24 +298,28 @@ nostr-identity/
 ┌─────────────────────────────────────────────────────────────┐
 │                      DNS / CDN                              │
 │                   nostr-identity.app                        │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-        ┌────────────┴────────────┐
-        │                         │
-        ▼                         ▼
-┌───────────────┐         ┌───────────────┐
-│   Frontend    │         │   Delegator   │
-│   (Vercel)    │         │   (Railway)   │
-│   Next.js     │         │   Node.js     │
-└───────┬───────┘         └───────┬───────┘
-        │                         │
-        │                         │
-        ▼                         ▼
-┌───────────────┐         ┌───────────────┐
-│   OutLayer    │◄────────┤   NEAR Chain  │
-│   TEE API     │         │   (Mainnet)   │
-│   (Rust WASM) │         └───────────────┘
-└───────────────┘
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│   Frontend (Vercel)                                         │
+│   Next.js app                                               │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│   OutLayer TEE                                              │
+│   - Identity generation                                     │
+│   - Built-in delegator functionality                        │
+│   - Encrypted storage                                       │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│   NEAR Blockchain (Mainnet)                                 │
+│   - Smart contract                                          │
+│   - Commitment/nullifier storage                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### **Deployment Commands**
@@ -343,16 +328,12 @@ nostr-identity/
 # 1. Deploy Smart Contract
 near deploy --accountId nostr-identity.near --wasm target/release/identity_contract.wasm
 
-# 2. Deploy TEE Backend
-cd nostr-identity-contract-zkp-tee
+# 2. Deploy TEE Backend (includes built-in delegator)
+cd contracts/nostr-identity-contract-zkp-tee
 cargo build --target wasm32-wasip2 --release
 outlayer deploy --name nostr-identity target/wasm32-wasip2/release/*.wasm
 
-# 3. Deploy Delegator Service
-cd delegator-service
-railway up
-
-# 4. Deploy Frontend
+# 3. Deploy Frontend
 cd apps/web
 vercel --prod
 ```
@@ -361,30 +342,30 @@ vercel --prod
 
 ## 🎯 Key Decision Points
 
-### **Use Delegator Service When:**
-- ✅ Need gas savings (batch registration)
-- ✅ Want maximum privacy (account_id off-chain)
-- ✅ High transaction volume
+### **The Delegator is Built-in:**
+- ✅ **TEE has built-in delegator functionality** - no separate service needed!
+- ✅ **Gas efficient** - TEE batches registrations when possible
+- ✅ **Maximum privacy** - account_id never stored on-chain
+- ✅ **Secure** - TEE signs as authorized delegator with hardware-protected keys
 
-### **Use Direct TEE When:**
-- ✅ Simpler architecture
-- ✅ Lower transaction volume
-- ✅ Direct user control
-
-### **Current Recommendation:**
-Start with **Direct TEE** (simpler), add **Delegator** later if needed for scaling.
+### **Architecture Benefits:**
+- Simpler - No separate delegator service to manage
+- More secure - Delegator keys in TEE hardware enclave
+- Faster - Direct TEE → Blockchain communication
+- Cheaper - No infrastructure costs for separate service
 
 ---
 
-## 📊 Feature Comparison Matrix
+## 📊 Feature Comparison
 
-| Feature | Direct TEE | + Delegator | + ZKP (Current) |
-|---------|-----------|-------------|-----------------|
-| Privacy | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| Gas Cost | $$ | $ | $$ |
-| Setup Complexity | Medium | High | High |
-| Security | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| Scalability | Medium | High | Medium |
+| Feature | Current Implementation |
+|---------|----------------------|
+| Privacy | ⭐⭐⭐⭐⭐ (ZKP + commitment scheme) |
+| Gas Cost | $$ (efficient batching in TEE) |
+| Setup Complexity | Medium (TEE deployment) |
+| Security | ⭐⭐⭐⭐⭐ (TEE + ZKP + NEP-413) |
+| Scalability | High (TEE handles load) |
+| Infrastructure | Low (only TEE + frontend needed) |
 
 ---
 

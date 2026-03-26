@@ -24,6 +24,9 @@ export interface TeeResponse {
   success: boolean
   npub?: string
   nsec?: string
+  commitment?: string
+  nullifier?: string
+  transaction_hash?: string
   created_at?: number
   error?: string
 }

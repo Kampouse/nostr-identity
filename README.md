@@ -11,7 +11,6 @@ nostr-identity/
 ├── apps/
 │   └── web/                      # Frontend (Next.js)
 ├── services/
-│   ├── delegator/                # Delegator service (TypeScript)
 │   └── zkp/                      # ZKP implementation (Circom)
 ├── contracts/
 │   ├── nostr-identity-contract/  # Basic TEE contract
@@ -20,7 +19,7 @@ nostr-identity/
 │   ├── crypto/                   # Shared cryptographic utilities
 │   ├── types/                    # Shared TypeScript types
 │   └── nostr/                    # Nostr protocol utilities
-├── archived/                     # Legacy/unused contracts
+├── archived/                     # Legacy/unused contracts and services
 └── docs/                         # Documentation
 ```
 
@@ -36,9 +35,6 @@ pnpm install
 
 # Run frontend
 pnpm dev
-
-# Run delegator service
-pnpm dev:delegator
 
 # Build smart contract
 pnpm build:contract

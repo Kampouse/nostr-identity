@@ -20,6 +20,9 @@ export default function Home() {
     nsec: string
     npubBech32: string
     nsecBech32: string
+    commitment: string
+    nullifier: string
+    transactionHash?: string
     createdAt: number
   } | null>(null)
   
@@ -60,7 +63,7 @@ export default function Home() {
     await connector.disconnect()
   }
 
-  // Generate identity using TEE
+  // Generate identity using TEE with blockchain registration
   const generateIdentity = async () => {
     if (!accountId || !connector) return
 
@@ -69,24 +72,24 @@ export default function Home() {
 
     try {
       const wallet = await connector.wallet()
-      
+
       // 1. Create NEP-413 auth request
       const message = `Generate Nostr identity for ${accountId}`
       const nonce = crypto.randomUUID()
-      
+
       // 2. Get NEP-413 signature using signMessage
       const authResponse = await wallet.signMessage({
         message,
         nonce: new TextEncoder().encode(nonce),
         recipient: "nostr-identity.near"
       })
-      
+
       if (!authResponse || !authResponse.signature) {
         throw new Error('Wallet signature required')
       }
-      
+
       console.log('✅ NEP-413 signature obtained')
-      
+
       // 3. Format for TEE backend
       const nep413_response = {
         account_id: authResponse.accountId,
@@ -98,40 +101,53 @@ export default function Home() {
           recipient: "nostr-identity.near"
         }
       }
-      
-      // 4. Send to TEE
+
+      // 4. Send to TEE with blockchain registration
+      const contractId = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
+      const registrationNonce = Date.now()
+
       const response = await fetch(TEE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'generate',
+          action: 'register_via_contract',
           account_id: accountId,
-          nep413_response
+          nep413_response,
+          contract_id: contractId,
+          nonce: registrationNonce
         })
       })
-      
+
       const data: TeeResponse = await response.json()
-      
+
       if (!data.success) {
         throw new Error(data.error || 'Failed to create identity')
       }
-      
-      if (!data.npub || !data.nsec) {
-        throw new Error('Invalid response from TEE')
+
+      if (!data.npub || !data.nsec || !data.commitment || !data.nullifier) {
+        throw new Error('Invalid response from TEE - missing required fields')
       }
-      
-      // 4. Encode to bech32
+
+      console.log('✅ Identity registered on blockchain')
+      console.log('📝 Transaction hash:', data.transaction_hash)
+      console.log('🔒 Commitment:', data.commitment)
+      console.log('🚫 Nullifier:', data.nullifier)
+
+      // 5. Encode to bech32
       const npubBech32 = encodeBech32('npub', data.npub)
       const nsecBech32 = encodeBech32('nsec', data.nsec)
-      
+
       setIdentity({
         npub: data.npub,
         nsec: data.nsec,
         npubBech32,
         nsecBech32,
+        commitment: data.commitment,
+        nullifier: data.nullifier,
+        transactionHash: data.transaction_hash,
         createdAt: data.created_at || Date.now()
       })
-      
+
     } catch (err: any) {
       setError(err.message || 'Failed to generate identity')
       console.error(err)
@@ -251,7 +267,39 @@ export default function Home() {
             </div>
 
             <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-4">
-              ✅ Identity generated with NEP-413 verification!
+              ✅ Identity generated and registered on blockchain!
+              {identity.transactionHash && (
+                <div className="mt-2 text-sm">
+                  Transaction:{' '}
+                  <a
+                    href={`https://explorer.testnet.near.org/transactions/${identity.transactionHash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-green-700 underline hover:text-green-900"
+                  >
+                    {identity.transactionHash.slice(0, 20)}...
+                  </a>
+                </div>
+              )}
+            </div>
+
+            {/* Blockchain Registration Info */}
+            <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded mb-4">
+              <h3 className="font-semibold text-blue-900 mb-2">🔗 Blockchain Registration</h3>
+              <div className="space-y-2 text-sm">
+                <div>
+                  <span className="text-gray-600">Commitment:</span>
+                  <div className="font-mono text-xs bg-white p-2 rounded mt-1 break-all">
+                    {identity.commitment}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-gray-600">Nullifier:</span>
+                  <div className="font-mono text-xs bg-white p-2 rounded mt-1 break-all">
+                    {identity.nullifier}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Public Key */}
@@ -321,6 +369,10 @@ export default function Home() {
                 ✅ Keys are random (not derived from public data)
                 <br />
                 ✅ Forgery-proof (NEP-413 verification)
+                <br />
+                ✅ Registered on NEAR blockchain (commitment hash)
+                <br />
+                ✅ Verifiable by anyone on-chain
                 <br />
                 ⚠️ NOT recoverable - you must save your key!
               </span>
