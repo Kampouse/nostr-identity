@@ -1,4 +1,5 @@
-import { secp256k1 } from '@noble/secp256k1'
+import { getPublicKey as getPubKey, sign, verify, keygen, utils } from '@noble/secp256k1'
+import { bytesToHex, hexToBytes } from '@nostr-identity/crypto'
 
 /**
  * Generate a random Nostr keypair
@@ -7,20 +8,35 @@ export async function generateKeyPair(): Promise<{
   secretKey: Uint8Array
   publicKey: Uint8Array
 }> {
-  const secretKey = secp256k1.utils.randomPrivateKey()
-  const publicKey = secp256k1.getPublicKey(secretKey, true)
-  return { secretKey, publicKey }
+  return keygen()
 }
 
 /**
  * Get public key from secret key
  */
 export function getPublicKey(secretKey: Uint8Array): Uint8Array {
-  return secp256k1.getPublicKey(secretKey, true)
+  return getPubKey(secretKey, true)
+}
+
+/**
+ * Get public key from secret key (hex format)
+ */
+export function getPublicKeyHex(secretKeyHex: string): string {
+  const secretKey = hexToBytes(secretKeyHex)
+  const publicKey = getPubKey(secretKey, true)
+  return bytesToHex(publicKey)
+}
+
+/**
+ * Sign a message with private key
+ */
+export function signMessage(message: Uint8Array, secretKey: Uint8Array): Uint8Array {
+  return sign(message, secretKey)
 }
 
 /**
  * Sign a Nostr event
+ * Note: This is a simplified version - full Nostr event signing would use the event serialization
  */
 export async function signEvent(
   eventData: {
@@ -42,26 +58,36 @@ export async function signEvent(
   ])
 
   const messageBytes = new TextEncoder().encode(message)
-  const signature = await secp256k1.sign(messageBytes, secretKey)
+  const signature = sign(messageBytes, secretKey)
 
-  return signature.toCompactHex()
+  return bytesToHex(signature)
 }
 
 /**
- * Verify a Nostr event signature
+ * Verify a signature
  */
-export async function verifySignature(
-  signature: string,
-  message: string,
-  publicKey: string
-): Promise<boolean> {
+export function verifySignature(
+  signature: Uint8Array,
+  message: Uint8Array,
+  publicKey: Uint8Array
+): boolean {
   try {
-    return await secp256k1.verify(
-      signature,
-      new TextEncoder().encode(message),
-      publicKey
-    )
+    return verify(signature, message, publicKey)
   } catch {
     return false
   }
+}
+
+/**
+ * Validate a secret key
+ */
+export function isValidSecretKey(secretKey: Uint8Array): boolean {
+  return utils.isValidSecretKey(secretKey)
+}
+
+/**
+ * Validate a public key
+ */
+export function isValidPublicKey(publicKey: Uint8Array): boolean {
+  return utils.isValidPublicKey(publicKey, true)
 }

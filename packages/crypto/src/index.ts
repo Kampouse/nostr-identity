@@ -33,7 +33,7 @@ export function encodeBech32(prefix: string, hex: string): string {
  * Decode bech32 format to bytes
  */
 export function decodeBech32(input: string): { prefix: string; bytes: Uint8Array } {
-  const { prefix, words } = bech32.decode(input)
+  const { prefix, words } = bech32.decode(input as `${string}1${string}`)
   const bytes = bech32.fromWords(words)
   return { prefix, bytes: new Uint8Array(bytes) }
 }
