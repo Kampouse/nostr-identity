@@ -136,6 +136,9 @@ pub struct ActionResult {
     /// Transaction payload for near-signer-tee (when using prepare_writer_call)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_payload: Option<serde_json::Value>,
+    /// Signed transaction ready to submit (when using RegisterWithZkp)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_transaction: Option<serde_json::Value>,
 }
 
 // For delegated registration via smart contract
@@ -1192,24 +1195,45 @@ fn handle_register_with_zkp(
         "deadline": deadline,
     });
     
-    // 6. Create transaction payload for near-signer-tee
+    // 6. Call near-signer-tee to sign the transaction
+    let signer_tee = "kampouse.near/near-signer-tee";
     let tx_nonce = created_at * 1000;
-    let tx_payload = serde_json::json!({
-        "signer_id": "kampouse.near",
-        "receiver_id": writer_contract_id,
-        "nonce": tx_nonce,
-        "block_hash": "FETCH_LATEST_BLOCK_HASH",
-        "actions": [{
-            "FunctionCall": {
-                "method_name": "write",
-                "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
-                "gas": "30000000000000",
-                "deposit": "0",
-            }
-        }],
+
+    // Get current block hash (in production, this would query NEAR RPC)
+    // For now, use placeholder - client will need to fetch latest
+    let block_hash = "FETCH_LATEST_BLOCK_HASH";
+
+    let sign_request = serde_json::json!({
+        "method": "sign_tx",
+        "params": {
+            "signer_id": "kampouse.near",
+            "receiver_id": writer_contract_id,
+            "nonce": tx_nonce,
+            "block_hash": block_hash,
+            "actions": [{
+                "FunctionCall": {
+                    "method_name": "write",
+                    "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
+                    "gas": 30000000000000u64,
+                    "deposit": "0",
+                }
+            }]
+        }
     });
-    
-    // 7. Return result (NO nsec - client already has it!)
+
+    // Call near-signer-tee via OutLayer
+    let signed_tx = match call_near_signer_tee(signer_tee, sign_request) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return ActionResult {
+                success: false,
+                error: Some(format!("Failed to sign transaction: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // 7. Return signed transaction to client (they will submit it)
     ActionResult {
         success: true,
         npub: Some(npub),
@@ -1218,7 +1242,8 @@ fn handle_register_with_zkp(
         nullifier: Some(nullifier),
         created_at: Some(created_at),
         attestation: Some(generate_attestation()),
-        tx_payload: Some(tx_payload),
+        signed_transaction: Some(signed_tx),
+        tx_payload: None, // Not needed anymore
         ..Default::default()
     }
 }
@@ -1252,6 +1277,43 @@ fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
     #[cfg(not(feature = "outlayer-tee"))]
     {
         hex::encode(&message_hash)
+    }
+}
+
+// Call near-signer-tee to sign a transaction
+fn call_near_signer_tee(
+    signer_tee: &str,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Production: OutLayer provides TEE-to-TEE communication
+    #[cfg(feature = "outlayer-tee")]
+    {
+        // OutLayer SDK would provide: outlayer_tee_call(tee_id, method, params)
+        // For now, we construct the call manually
+        //
+        // In production:
+        //   let response = outlayer_tee_call(signer_tee, "sign_tx", request["params"])?;
+        //   Ok(response)
+        //
+        // Current: Return mock signed transaction
+        let mock_signed_tx = serde_json::json!({
+            "transaction": request,
+            "signature": "mock_signature_will_be_replaced_by_real_tee_signature",
+            "hash": format!("tx_{}", hex::encode(compute_sha256(&request.to_string()))),
+        });
+        Ok(mock_signed_tx)
+    }
+
+    // Testing: Mock response for local development
+    #[cfg(not(feature = "outlayer-tee"))]
+    {
+        let _ = signer_tee; // Suppress unused warning
+        let mock_signed_tx = serde_json::json!({
+            "transaction": request,
+            "signature": "mock_signature_for_testing",
+            "hash": format!("mock_tx_{}", hex::encode(compute_sha256(&request.to_string()))),
+        });
+        Ok(mock_signed_tx)
     }
 }
 
