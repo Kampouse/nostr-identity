@@ -1195,34 +1195,28 @@ fn handle_register_with_zkp(
         "deadline": deadline,
     });
     
-    // 6. Call near-signer-tee to sign the transaction
-    let signer_tee = "kampouse.near/near-signer-tee";
+    // 6. Sign the transaction using NEAR private key from OutLayer secrets
     let tx_nonce = created_at * 1000;
 
-    // Get current block hash (in production, this would query NEAR RPC)
-    // For now, use placeholder - client will need to fetch latest
-    let block_hash = "FETCH_LATEST_BLOCK_HASH";
+    // Build action for writer contract
+    let actions = vec![
+        serde_json::json!({
+            "FunctionCall": {
+                "method_name": "write",
+                "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
+                "gas": 30000000000000u64,
+                "deposit": "0",
+            }
+        })
+    ];
 
-    let sign_request = serde_json::json!({
-        "method": "sign_tx",
-        "params": {
-            "signer_id": "kampouse.near",
-            "receiver_id": writer_contract_id,
-            "nonce": tx_nonce,
-            "block_hash": block_hash,
-            "actions": [{
-                "FunctionCall": {
-                    "method_name": "write",
-                    "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
-                    "gas": 30000000000000u64,
-                    "deposit": "0",
-                }
-            }]
-        }
-    });
-
-    // Call near-signer-tee via OutLayer
-    let signed_tx = match call_near_signer_tee(signer_tee, sign_request) {
+    // Sign the transaction
+    let signed_tx = match sign_transaction_with_near_key(
+        "kampouse.near".to_string(),
+        writer_contract_id.to_string(),
+        tx_nonce,
+        actions,
+    ) {
         Ok(tx) => tx,
         Err(e) => {
             return ActionResult {
@@ -1280,41 +1274,67 @@ fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
     }
 }
 
-// Call near-signer-tee to sign a transaction
-fn call_near_signer_tee(
-    signer_tee: &str,
-    request: serde_json::Value,
+// Sign transaction using NEAR private key from OutLayer secrets
+fn sign_transaction_with_near_key(
+    signer_id: String,
+    receiver_id: String,
+    nonce: u64,
+    actions: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    // Production: OutLayer provides TEE-to-TEE communication
-    #[cfg(feature = "outlayer-tee")]
-    {
-        // OutLayer SDK would provide: outlayer_tee_call(tee_id, method, params)
-        // For now, we construct the call manually
-        //
-        // In production:
-        //   let response = outlayer_tee_call(signer_tee, "sign_tx", request["params"])?;
-        //   Ok(response)
-        //
-        // Current: Return mock signed transaction
-        let mock_signed_tx = serde_json::json!({
-            "transaction": request,
-            "signature": "mock_signature_will_be_replaced_by_real_tee_signature",
-            "hash": format!("tx_{}", hex::encode(compute_sha256(&request.to_string()))),
-        });
-        Ok(mock_signed_tx)
+    use sha2::{Sha256, Digest};
+    use ed25519_dalek::Signer;
+
+    // Get private key from environment (set by OutLayer secrets)
+    let key_str = std::env::var("NEAR_PRIVATE_KEY")
+        .map_err(|_| "NEAR_PRIVATE_KEY not set in OutLayer secrets")?;
+
+    // Parse ed25519 private key
+    let key_str = key_str.strip_prefix("ed25519:")
+        .ok_or("Invalid key format - must start with ed25519:")?;
+    let key_bytes = bs58::decode(key_str)
+        .into_vec()
+        .map_err(|e| format!("Failed to decode key: {}", e))?;
+
+    let secret_key = ed25519_dalek::SigningKey::from_bytes(
+        &key_bytes.try_into()
+            .map_err(|_| "Invalid key length")?
+    );
+
+    // Build transaction data
+    let mut tx_data = Vec::new();
+    tx_data.extend_from_slice(signer_id.as_bytes());
+    tx_data.extend_from_slice(receiver_id.as_bytes());
+    tx_data.extend_from_slice(&nonce.to_le_bytes());
+
+    // Add actions
+    for action in &actions {
+        tx_data.extend_from_slice(&action.to_string().as_bytes());
     }
 
-    // Testing: Mock response for local development
-    #[cfg(not(feature = "outlayer-tee"))]
-    {
-        let _ = signer_tee; // Suppress unused warning
-        let mock_signed_tx = serde_json::json!({
-            "transaction": request,
-            "signature": "mock_signature_for_testing",
-            "hash": format!("mock_tx_{}", hex::encode(compute_sha256(&request.to_string()))),
-        });
-        Ok(mock_signed_tx)
-    }
+    // Hash the transaction data
+    let mut hasher = Sha256::new();
+    hasher.update(&tx_data);
+    let tx_hash = hasher.finalize();
+
+    // Sign the hash (need to convert to 32-byte array)
+    let tx_hash_array: [u8; 32] = tx_hash.try_into()
+        .map_err(|_| "Hash length mismatch")?;
+
+    // Sign using the transaction hash
+    let signature = secret_key.sign(&tx_hash_array);
+
+    // Return signed transaction
+    Ok(serde_json::json!({
+        "transaction": {
+            "signer_id": signer_id,
+            "receiver_id": receiver_id,
+            "nonce": nonce,
+            "actions": actions,
+        },
+        "signature": format!("ed25519:{}", bs58::encode(signature.to_bytes()).into_string()),
+        "public_key": format!("ed25519:{}", bs58::encode(secret_key.verifying_key().as_bytes()).into_string()),
+        "hash": hex::encode(tx_hash),
+    }))
 }
 
 // Call smart contract via OutLayer
