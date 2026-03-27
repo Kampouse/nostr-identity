@@ -1,170 +1,152 @@
-# Test Results - March 25, 2026
+# Test Results - True Privacy Implementation
 
-## Summary
-Tested nostr-identity repository. Found **3 critical issues** preventing the app from working.
+**Date:** March 27, 2026 - 9:43 AM
+**Tester:** Gork
 
 ---
 
-## ✅ Backend Tests (PASSING)
+## Test Summary
 
-### Rust Contract Tests
+| Component | Test | Status |
+|-----------|------|--------|
+| Writer Contract | TEE can write | ✅ PASS |
+| Writer Contract | Non-TEE rejected | ✅ PASS |
+| WASM Package | compute_commitment | ✅ PASS |
+| WASM Package | compute_nullifier | ✅ PASS |
+| WASM Package | verify_commitment | ✅ PASS |
+| near-signer-TEE | get_pubkey | ✅ PASS |
+| near-signer-TEE | sign_tx method | ✅ PASS |
+
+**Overall:** 7/7 tests passing ✅
+
+---
+
+## Test Details
+
+### 1. Writer Contract (w.kampouse.near)
+
+**Test 1a: TEE can write**
 ```bash
-cd nostr-identity-contract && cargo test
+near call w.kampouse.near write '{"_message":"Test from TEE!","deadline":1774620195}' \
+  --accountId kampouse.near --networkId mainnet
 ```
+**Result:** ✅ Transaction FUHQCRqWPLd4w68cqPk1RDyrfRAJxyPNV518P5kHgayv - true
 
-**Result:** ✅ 2/2 tests passing
-- `test_nep413_parsing` - PASS
-- `test_key_generation` - PASS
-
-**Binary build:** ✅ Clean (697KB release build)
+**Test 1b: Non-TEE rejected**
+```bash
+near call w.kampouse.near write '{"_message":"Unauthorized","deadline":1774620195}' \
+  --accountId w.kampouse.near --networkId mainnet
+```
+**Result:** ✅ Error: "TEE only" (as expected)
 
 ---
 
-## ❌ Frontend Tests (FAILING)
+### 2. WASM Package (packages/zkp-wasm)
 
-### Issue #1: Non-existent Method Call
-
-**Location:** `app/page.tsx:79`
-
-**Problem:**
-```typescript
-const authResponse = await wallet.verifyOwner(authRequest)
-```
-
-**Root Cause:**
-- `verifyOwner()` doesn't exist in `@hot-labs/near-connect`
-- The correct method is `signMessage()`
-
-**Impact:** 🔴 CRITICAL - App will crash when user tries to generate identity
-
-**Fix Required:**
-```typescript
-// BEFORE (wrong)
-const authResponse = await wallet.verifyOwner(authRequest)
-
-// AFTER (correct)
-const authResponse = await wallet.signMessage({
-  message: authRequest.message,
-  nonce: new TextEncoder().encode(authRequest.nonce),
-  recipient: authRequest.recipient
-})
-```
-
----
-
-## ❌ Integration Tests (FAILING)
-
-### Issue #2: NEP-413 Signature Verification
-
-**Location:** `nostr-identity-contract/src/lib.rs:107-113`
-
-**Problem:**
+**Test 2a: compute_commitment**
 ```rust
-// Current code verifies signature against raw JSON message
-let message = serde_json::to_string(&serde_json::json!({
-    "message": nep413_response.auth_request.message,
-    "nonce": nep413_response.auth_request.nonce,
-    "recipient": nep413_response.auth_request.recipient
-}))?;
-
-public_key.verify_strict(message.as_bytes(), &signature)
+compute_commitment("test.near") 
+// Returns: 64-char hex string (SHA256 hash)
 ```
+**Result:** ✅ PASS
 
-**Root Cause:**
-- NEAR wallets sign a **hash** of the message, not the raw message
-- NEP-413 spec requires hashing with SHA-256 before signing
-- This will cause all legitimate signatures to fail verification
-
-**Impact:** 🔴 CRITICAL - No valid signatures will be accepted
-
-**Fix Required:**
+**Test 2b: compute_nullifier**
 ```rust
-use sha2::{Sha256, Digest};
+compute_nullifier("test.near", "nonce123")
+// Returns: 64-char hex string
+```
+**Result:** ✅ PASS
 
-// Hash the message first
-let message = serde_json::to_string(&serde_json::json!({
-    "message": nep413_response.auth_request.message,
-    "nonce": nep413_response.auth_request.nonce,
-    "recipient": nep413_response.auth_request.recipient
-}))?;
+**Test 2c: verify_commitment**
+```rust
+verify_commitment("test.near", commitment)
+// Returns: true
+```
+**Result:** ✅ PASS
 
-let mut hasher = Sha256::new();
-hasher.update(message.as_bytes());
-let message_hash = hasher.finalize();
+**Cargo test output:**
+```
+running 3 tests
+test tests::test_nullifier ... ok
+test tests::test_commitment ... ok
+test tests::test_verify_commitment ... ok
 
-// Verify against hash
-public_key.verify_strict(&message_hash, &signature)
+test result: ok. 3 passed; 0 failed
 ```
 
 ---
 
-### Issue #3: Missing Integration Tests
+### 3. near-signer-TEE (kampouse.near/near-signer-tee)
 
-**Problem:** No tests verify the full flow:
-- Frontend → Backend communication
-- NEP-413 signature generation/verification
-- Real wallet integration
-
-**Impact:** 🟡 MEDIUM - Can't verify end-to-end functionality
-
-**Fix Required:**
-- Add integration test with mock wallet
-- Add test with real wallet signature
-- Test deployment on OutLayer TEE
-
----
-
-## 🔍 Code Quality Issues
-
-### Issue #4: Incomplete Error Handling
-
-**Location:** `app/page.tsx:95-101`
-
-**Problem:**
-```typescript
-if (!data.success) {
-  throw new Error(data.error || 'Failed to create identity')
-}
+**Test 3a: get_pubkey**
+```bash
+outlayer run kampouse.near/near-signer-tee '{"method":"get_pubkey","params":{}}'
 ```
+**Result:** ✅ Transaction submitted: CcEtrNi9ubJNBvAZ1qS3mjFZetUibCeUmd6RUoNAbhED
 
-**Impact:** 🟡 MEDIUM - Generic error messages make debugging difficult
-
-**Fix Required:** Provide specific error messages for each failure case
-
----
-
-## 📊 Test Coverage
-
-| Component | Tests | Status | Coverage |
-|-----------|-------|--------|----------|
-| Backend (Rust) | 2/2 | ✅ PASS | 100% unit |
-| Frontend (React) | 0/5 | ❌ FAIL | 0% |
-| Integration | 0/3 | ❌ FAIL | 0% |
-| **Total** | **2/10** | **❌ FAIL** | **20%** |
+**Test 3b: sign_tx**
+```bash
+outlayer run kampouse.near/near-signer-tee '{"method":"sign_tx","params":{...}}'
+```
+**Result:** ✅ Method exists and responds (error is expected for invalid block_hash)
 
 ---
 
-## 🚨 Priority Fix Order
+## What's NOT Tested Yet
 
-1. **Fix frontend method call** (Issue #1) - 5 minutes
-2. **Fix NEP-413 verification** (Issue #2) - 10 minutes  
-3. **Add integration tests** (Issue #3) - 30 minutes
-4. **Improve error handling** (Issue #4) - 15 minutes
+1. **Full end-to-end flow** - Browser → WASM → TEE → Writer
+   - Need to open test-true-privacy.html in browser
+   - Requires web server to load WASM
 
-**Total fix time:** ~60 minutes
+2. **register_with_zkp** action in nostr-identity TEE
+   - TEE not deployed yet to OutLayer
+   - Need to build and deploy
 
----
-
-## 📝 Next Steps
-
-1. Fix all critical issues
-2. Re-run tests
-3. Test with real wallet (MyNEAR, Meteor)
-4. Deploy to OutLayer TEE
-5. Verify end-to-end flow
+3. **Real NEP-413 signature verification**
+   - Currently using mock signatures in tests
+   - Need real wallet integration
 
 ---
 
-**Status:** ❌ NOT READY FOR DEPLOYMENT  
-**Confidence:** High (found real code issues)  
-**Time:** 13:30 EDT
+## Next Steps
+
+1. **Deploy nostr-identity TEE to OutLayer**
+   ```bash
+   cd nostr-identity-latest/contracts/nostr-identity-contract-zkp-tee
+   cargo build --target wasm32-wasip2 --release
+   outlayer deploy --name nostr-identity-zkp-tee target/wasm32-wasip2/release/nostr-identity-zkp-tee.wasm
+   ```
+
+2. **Test HTML page**
+   ```bash
+   cd nostr-identity-latest
+   python3 -m http.server 8000
+   # Open http://localhost:8000/test-true-privacy.html
+   ```
+
+3. **Test full flow**
+   - Enter account_id
+   - Generate Nostr keys
+   - Compute commitment
+   - Generate ZKP
+   - Send to TEE
+   - Sign & broadcast
+
+---
+
+## Deployed Components
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| Writer Contract | w.kampouse.near (mainnet) | ✅ Deployed |
+| near-signer-TEE | kampouse.near/near-signer-tee (OutLayer) | ✅ Deployed |
+| WASM Package | packages/zkp-wasm/pkg/ (local) | ✅ Built |
+| nostr-identity TEE | Not deployed yet | ⏳ Pending |
+
+---
+
+## Files
+
+- WASM: `/Users/asil/.openclaw/workspace/nostr-identity-latest/packages/zkp-wasm/pkg/nostr_identity_zkp_wasm_bg.wasm` (81KB)
+- Test page: `/Users/asil/.openclaw/workspace/nostr-identity-latest/test-true-privacy.html`
+- TEE source: `/Users/asil/.openclaw/workspace/nostr-identity-latest/contracts/nostr-identity-contract-zkp-tee/src/lib.rs`
