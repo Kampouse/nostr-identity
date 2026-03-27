@@ -129,11 +129,17 @@ pub fn compute_commitment(account_id: &str) -> String {
     hex::encode(hash)
 }
 
-/// Generate ownership proof
-/// This proves "I own account_id" WITHOUT revealing account_id
+/// Generate ownership proof using Nostr private key as salt
+/// This provides MAXIMUM privacy because:
+/// 1. nsec has 256-bit entropy (impossible to brute-force)
+/// 2. nsec is already kept secret by user
+/// 3. nsec is already part of Nostr ecosystem
+/// 
+/// commitment_hash = SHA256(SHA256(account_id + nsec))
 #[wasm_bindgen]
-pub fn generate_ownership_proof(
+pub fn generate_ownership_proof_with_nsec(
     account_id: &str,
+    nsec_hex: &str,
     nonce: &str,
 ) -> Result<JsValue, JsValue> {
     // Ensure initialized
@@ -144,18 +150,30 @@ pub fn generate_ownership_proof(
     let pk: ProvingKey<Bn254> = CanonicalDeserialize::deserialize_compressed(&pk_bytes[..])
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize PK: {}", e)))?;
     
-    // Compute commitment
-    let commitment_input = format!("commitment:{}", account_id);
-    let hash = Sha256::digest(commitment_input.as_bytes());
+    // Parse nsec (32 bytes hex = 64 hex chars)
+    let nsec_bytes = hex::decode(nsec_hex)
+        .map_err(|e| JsValue::from_str(&format!("Invalid nsec hex: {}", e)))?;
+    if nsec_bytes.len() != 32 {
+        return Err(JsValue::from_str("nsec must be 32 bytes (64 hex chars)"));
+    }
+    
+    // Compute commitment = SHA256(account_id || nsec)
+    let commitment_input = format!("{}{}", account_id, nsec_hex);
+    let commitment_hash_inner = Sha256::digest(commitment_input.as_bytes());
+    
+    // Compute commitment_hash = SHA256(commitment) for extra security
+    let commitment_hash = Sha256::digest(&commitment_hash_inner);
+    
+    // Convert to field element for ZKP
     let mut commitment_bytes = [0u8; 32];
-    commitment_bytes.copy_from_slice(&hash[..32]);
-    let commitment = Fr::from_le_bytes_mod_order(&commitment_bytes);
+    commitment_bytes.copy_from_slice(&commitment_hash[..32]);
+    let commitment_field = Fr::from_le_bytes_mod_order(&commitment_bytes);
     
     // Create circuit
     let circuit = NEAROwnershipCircuit {
         account_id: Some(account_id.to_string()),
         nonce: Some(nonce.to_string()),
-        commitment: Some(commitment),
+        commitment: Some(commitment_field),
     };
     
     // Generate proof
@@ -168,15 +186,11 @@ pub fn generate_ownership_proof(
     proof.serialize_compressed(&mut proof_bytes)
         .map_err(|e| JsValue::from_str(&format!("Proof serialization failed: {}", e)))?;
     
-    // Serialize public inputs
-    let mut commitment_out = Vec::new();
-    commitment.serialize_compressed(&mut commitment_out)
-        .map_err(|e| JsValue::from_str(&format!("Commitment serialization failed: {}", e)))?;
-    
     Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
         "proof": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &proof_bytes),
-        "commitment": hex::encode(&commitment_bytes),
-        "public_inputs": [hex::encode(&commitment_bytes)],
+        "commitment_hash": hex::encode(&commitment_hash),
+        "commitment": hex::encode(&commitment_hash_inner),  // Inner hash (for ZKP)
+        "public_inputs": [hex::encode(&commitment_hash)],
         "proof_size": proof_bytes.len(),
     })).unwrap())
 }
