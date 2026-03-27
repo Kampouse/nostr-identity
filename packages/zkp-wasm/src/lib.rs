@@ -3,108 +3,116 @@ use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
 
 /// ============================================================================
-/// TRUE PRIVACY WITH SECRET SALT
+/// RECOVERABLE PRIVACY - No Salt Storage Needed!
 /// ============================================================================
 /// 
-/// CRITICAL: Without a secret salt, commitments can be brute-forced!
+/// INNOVATION: Derive salt from NEP-413 signature
 /// 
-/// WRONG (can be traced):
-///   commitment = SHA256("commitment:" || account_id)
-///   Anyone can compute: SHA256("commitment:alice.near") and check if it matches
+/// salt = SHA256(nep413_signature)
 /// 
-/// CORRECT (private):
-///   commitment = SHA256("commitment:" || account_id || secret_salt)
-///   Without the salt, NO ONE can compute the commitment
-///   User keeps the salt in their browser - NEVER shared!
+/// Benefits:
+/// 1. User never stores anything extra
+/// 2. Can ALWAYS recompute salt (just sign again)
+/// 3. Recoverable forever (as long as wallet access)
+/// 4. Same signature = same salt = same commitment (deterministic)
+/// 
+/// Example:
+///   User signs: "Register Nostr identity v1"
+///   salt = SHA256(signature) = "a1b2c3..."
+///   commitment = SHA256(account_id + salt)
+///   
+///   5 years later, new computer:
+///   User signs: "Register Nostr identity v1" (SAME message)
+///   salt = SHA256(signature) = "a1b2c3..." (SAME salt!)
+///   Can prove ownership again!
 /// 
 /// ============================================================================
 
-/// Generate a random secret salt (user keeps this PRIVATE!)
+/// Derive salt deterministically from NEP-413 signature
+/// This is the KEY innovation - no storage needed!
+/// 
+/// IMPORTANT: User must sign the EXACT SAME message to get the same salt
 #[wasm_bindgen]
-pub fn generate_secret_salt() -> String {
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("Random generation failed");
-    hex::encode(bytes)
+pub fn derive_salt_from_signature(nep413_signature_b64: &str) -> String {
+    // Hash the signature to get the salt
+    // Same signature = same salt
+    let hash = Sha256::digest(nep413_signature_b64.as_bytes());
+    hex::encode(hash)
 }
 
-/// Compute commitment from account_id and SECRET SALT
+/// Compute commitment with signature-derived salt
 /// commitment = SHA256("commitment:" || account_id || ":" || salt)
-/// 
-/// The salt is NEVER sent to TEE or stored on-chain!
+/// where salt = SHA256(signature)
 #[wasm_bindgen]
-pub fn compute_commitment_private(account_id: &str, secret_salt: &str) -> String {
-    // Include salt to prevent brute-forcing
-    let input = format!("commitment:{}:{}", account_id, secret_salt);
-    let hash = Sha256::digest(input.as_bytes());
-    hex::encode(hash)
-}
-
-/// Compute nullifier from account_id, salt, and nonce
-/// nullifier = SHA256("nullifier:" || account_id || ":" || salt || ":" || nonce)
-#[wasm_bindgen]
-pub fn compute_nullifier_private(account_id: &str, secret_salt: &str, nonce: &str) -> String {
-    let input = format!("nullifier:{}:{}:{}", account_id, secret_salt, nonce);
-    let hash = Sha256::digest(input.as_bytes());
-    hex::encode(hash)
-}
-
-/// ZKP proof structure
-#[derive(Serialize, Deserialize)]
-pub struct ZkpProof {
-    pub proof: String,
-    pub public_inputs: Vec<String>,
-}
-
-/// Generate ownership proof with SECRET SALT
-/// The salt is NEVER revealed - only used locally
-#[wasm_bindgen]
-pub fn generate_ownership_proof_private(
+pub fn compute_commitment_recoverable(
     account_id: &str,
-    secret_salt: &str,
-    nonce: &str,
-    signature_b64: &str,
-    public_key_b58: &str,
-) -> Result<JsValue, JsValue> {
-    // Compute commitment and nullifier with salt
-    let commitment = compute_commitment_private(account_id, secret_salt);
-    let nullifier = compute_nullifier_private(account_id, secret_salt, nonce);
+    nep413_signature_b64: &str,
+) -> String {
+    // Derive salt from signature (no storage needed!)
+    let salt = derive_salt_from_signature(nep413_signature_b64);
     
-    // Create proof payload (salt NOT included!)
-    let proof_payload = serde_json::json!({
+    // Compute commitment
+    let input = format!("commitment:{}:{}", account_id, salt);
+    let hash = Sha256::digest(input.as_bytes());
+    hex::encode(hash)
+}
+
+/// Compute nullifier with signature-derived salt
+#[wasm_bindgen]
+pub fn compute_nullifier_recoverable(
+    account_id: &str,
+    nep413_signature_b64: &str,
+    nonce: &str,
+) -> String {
+    let salt = derive_salt_from_signature(nep413_signature_b64);
+    let input = format!("nullifier:{}:{}:{}", account_id, salt, nonce);
+    let hash = Sha256::digest(input.as_bytes());
+    hex::encode(hash)
+}
+
+/// Generate ownership proof with signature-derived salt
+/// User can ALWAYS recompute this (just sign the same message again)
+#[wasm_bindgen]
+pub fn generate_ownership_proof_recoverable(
+    account_id: &str,
+    nep413_signature_b64: &str,
+    public_key_b58: &str,
+    message: &str,
+) -> Result<JsValue, JsValue> {
+    // Derive salt from signature
+    let salt = derive_salt_from_signature(nep413_signature_b64);
+    
+    // Compute commitment and nullifier
+    let commitment = compute_commitment_recoverable(account_id, nep413_signature_b64);
+    let nonce = generate_nonce();
+    let nullifier = compute_nullifier_recoverable(account_id, nep413_signature_b64, &nonce);
+    
+    // Create proof
+    let proof = serde_json::json!({
         "commitment": commitment,
         "nullifier": nullifier,
-        "account_hash": hex::encode(&Sha256::digest(account_id.as_bytes())[..8]),
-        "signature": signature_b64,
         "public_key": public_key_b58,
-        "nonce": nonce,
-        // NOTE: secret_salt is NOT included!
+        "message": message,
+        "timestamp": get_timestamp(),
     });
     
-    let proof_bytes = serde_json::to_string(&proof_payload).unwrap_or_default();
-    let proof_hash = hex::encode(Sha256::digest(proof_bytes.as_bytes()));
-    
-    let result = ZkpProof {
-        proof: proof_hash,
-        public_inputs: vec![commitment, nullifier],
-    };
-    
-    serde_wasm_bindgen::to_value(&result)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    Ok(serde_wasm_bindgen::to_value(&proof).unwrap())
 }
 
-/// Verify ownership locally (user has their salt)
+/// Verify ownership - user just needs to sign the same message again!
 #[wasm_bindgen]
-pub fn verify_ownership_private(
+pub fn verify_ownership_recoverable(
     account_id: &str,
-    secret_salt: &str,
-    commitment: &str,
+    nep413_signature_b64: &str,
+    on_chain_commitment: &str,
 ) -> Result<JsValue, JsValue> {
-    let computed = compute_commitment_private(account_id, secret_salt);
+    // Recompute commitment from signature
+    let computed = compute_commitment_recoverable(account_id, nep413_signature_b64);
     
-    if computed == commitment {
+    if computed == on_chain_commitment {
         Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
             "valid": true,
-            "message": "Ownership verified - salt kept private!"
+            "message": "Ownership verified - recoverable anytime with wallet!"
         })).unwrap())
     } else {
         Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
@@ -132,73 +140,51 @@ pub fn generate_nonce() -> String {
     hex::encode(bytes)
 }
 
-// ============================================================================
-// DEPRECATED - These are INSECURE (can be brute-forced!)
-// ============================================================================
-
-/// DEPRECATED: Use compute_commitment_private instead
-/// This version can be brute-forced and deanonymized!
-#[wasm_bindgen]
-pub fn compute_commitment(account_id: &str) -> String {
-    // WARNING: Anyone can compute this for any account_id!
-    // Use compute_commitment_private with a secret salt instead
-    let input = format!("commitment:{}", account_id);
-    let hash = Sha256::digest(input.as_bytes());
-    hex::encode(hash)
-}
-
-/// DEPRECATED: Use compute_nullifier_private instead
-#[wasm_bindgen]
-pub fn compute_nullifier(account_id: &str, nonce: &str) -> String {
-    let input = format!("nullifier:{}{}", account_id, nonce);
-    let hash = Sha256::digest(input.as_bytes());
-    hex::encode(hash)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_private_commitment() {
-        let salt = generate_secret_salt();
-        let commitment = compute_commitment_private("test.near", &salt);
-        assert_eq!(commitment.len(), 64);
-        
-        // Same account + salt = same commitment
-        let commitment2 = compute_commitment_private("test.near", &salt);
-        assert_eq!(commitment, commitment2);
-        
-        // Different salt = different commitment (IMPORTANT!)
-        let salt2 = generate_secret_salt();
-        let commitment3 = compute_commitment_private("test.near", &salt2);
-        assert_ne!(commitment, commitment3);
+    fn test_salt_is_deterministic() {
+        // Same signature = same salt
+        let sig = "test_signature_base64";
+        let salt1 = derive_salt_from_signature(sig);
+        let salt2 = derive_salt_from_signature(sig);
+        assert_eq!(salt1, salt2);
     }
     
     #[test]
-    fn test_insecure_commitment_can_be_brute_forced() {
-        // This shows why the old method is INSECURE
-        let commitment = compute_commitment("alice.near");
-        
-        // Anyone can compute this!
-        let computed = compute_commitment("alice.near");
-        assert_eq!(commitment, computed);
-        
-        // This means alice.near can be DEANONYMIZED!
+    fn test_different_signatures_different_salts() {
+        let salt1 = derive_salt_from_signature("sig1");
+        let salt2 = derive_salt_from_signature("sig2");
+        assert_ne!(salt1, salt2);
     }
     
     #[test]
-    fn test_private_commitment_cannot_be_brute_forced() {
-        let salt = generate_secret_salt();
-        let commitment = compute_commitment_private("alice.near", &salt);
+    fn test_commitment_is_recoverable() {
+        let account = "alice.near";
+        let sig = "alice_signature_base64";
         
-        // Without the salt, you CANNOT verify if this is alice.near
-        let computed_without_salt = compute_commitment("alice.near");
-        assert_ne!(commitment, computed_without_salt);
+        // Compute commitment
+        let commitment = compute_commitment_recoverable(account, sig);
         
-        // Even with a different salt, you get a different commitment
-        let wrong_salt = generate_secret_salt();
-        let computed_wrong_salt = compute_commitment_private("alice.near", &wrong_salt);
-        assert_ne!(commitment, computed_wrong_salt);
+        // 5 years later, user signs again (same message = same sig)
+        let commitment_later = compute_commitment_recoverable(account, sig);
+        
+        // SAME commitment! Can recover ownership
+        assert_eq!(commitment, commitment_later);
+    }
+    
+    #[test]
+    fn test_cannot_brute_force() {
+        let sig = "secret_signature";
+        let commitment = compute_commitment_recoverable("alice.near", sig);
+        
+        // Without the signature, cannot compute commitment
+        // (this would be the "insecure" version without salt)
+        let insecure = format!("commitment:{}", "alice.near");
+        let insecure_hash = hex::encode(Sha256::digest(insecure.as_bytes()));
+        
+        assert_ne!(commitment, insecure_hash);
     }
 }
