@@ -133,6 +133,9 @@ pub struct ActionResult {
     pub commitment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullifier: Option<String>,
+    /// Transaction payload for near-signer-tee (when using prepare_writer_call)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_payload: Option<serde_json::Value>,
 }
 
 // For delegated registration via smart contract
@@ -499,6 +502,15 @@ pub enum Action {
         contract_id: String,
         nonce: u64,
     },
+    
+    /// Prepare a writer contract call - returns transaction payload for signing
+    #[serde(rename = "prepare_writer_call")]
+    PrepareWriterCall {
+        account_id: String,
+        nep413_response: Nep413AuthResponse,
+        writer_contract_id: String,
+        deadline: u64,
+    },
 }
 
 pub fn handle_action(action: Action) -> ActionResult {
@@ -533,6 +545,20 @@ pub fn handle_action(action: Action) -> ActionResult {
                 nep413_response,
                 contract_id,
                 nonce,
+            )
+        }
+        
+        Action::PrepareWriterCall {
+            account_id,
+            nep413_response,
+            writer_contract_id,
+            deadline,
+        } => {
+            handle_prepare_writer_call(
+                account_id,
+                nep413_response,
+                writer_contract_id,
+                deadline,
             )
         }
     }
@@ -965,6 +991,115 @@ fn handle_register_via_contract(
             error: Some(format!("Contract call failed: {}", e)),
             ..Default::default()
         },
+    }
+}
+
+/// Prepare a writer contract call - returns transaction payload for signing
+/// This allows the client to:
+/// 1. Call this to get identity + transaction payload
+/// 2. Call near-signer-tee to sign the transaction
+/// 3. Broadcast to writer contract
+fn handle_prepare_writer_call(
+    account_id: String,
+    nep413_response: Nep413AuthResponse,
+    writer_contract_id: String,
+    deadline: u64,
+) -> ActionResult {
+    // 1. Verify NEP-413 signature
+    if let Err(e) = verify_nep413_ownership(&account_id, &nep413_response) {
+        return ActionResult {
+            success: false,
+            error: Some(format!("NEP-413 verification failed: {}", e)),
+            ..Default::default()
+        };
+    }
+
+    // 2. Generate commitment and nullifier
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let commitment = {
+        let input = format!("commitment:{}", account_id);
+        hex::encode(compute_sha256(&input))
+    };
+    
+    let nullifier = {
+        let input = format!("nullifier:{}{}", account_id, nonce);
+        hex::encode(compute_sha256(&input))
+    };
+
+    // 3. Check if already registered
+    if is_commitment_used(&commitment) {
+        return ActionResult {
+            success: false,
+            error: Some("This NEAR account already has a Nostr identity".to_string()),
+            ..Default::default()
+        };
+    }
+
+    // 4. Generate Nostr keypair
+    let (npub, nsec) = match generate_nostr_keypair() {
+        Ok(keys) => keys,
+        Err(e) => {
+            return ActionResult {
+                success: false,
+                error: Some(format!("Key generation failed: {}", e)),
+                ..Default::default()
+            };
+        }
+    };
+
+    // 5. Store identity locally
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    store_identity(&commitment, &nullifier, &npub, created_at);
+
+    // 6. Prepare the message for the writer contract
+    let writer_message = serde_json::json!({
+        "npub": npub,
+        "commitment": commitment,
+        "nullifier": nullifier,
+        "timestamp": created_at,
+        "account_hash": hex::encode(compute_sha256(&account_id))[..16].to_string(),
+    });
+    
+    let writer_args = serde_json::json!({
+        "_message": writer_message.to_string(),
+        "deadline": deadline,
+    });
+
+    // 7. Create transaction payload for near-signer-tee
+    let tx_payload = serde_json::json!({
+        "signer_id": "kampouse.near",  // TEE account
+        "receiver_id": writer_contract_id,
+        "nonce": nonce * 1000,  // NEAR nonce needs to be unique
+        "block_hash": "FETCH_LATEST_BLOCK_HASH",
+        "actions": [{
+            "FunctionCall": {
+                "method_name": "write",
+                "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
+                "gas": "30000000000000",
+                "deposit": "0",
+            }
+        }],
+    });
+
+    // 8. Return everything needed for the client
+    ActionResult {
+        success: true,
+        npub: Some(npub),
+        nsec: Some(nsec),  // Include nsec so user can save it
+        commitment: Some(commitment),
+        nullifier: Some(nullifier),
+        created_at: Some(created_at),
+        attestation: Some(generate_attestation()),
+        tx_payload: Some(tx_payload),  // For near-signer-tee
+        ..Default::default()
     }
 }
 
