@@ -53,3 +53,6 @@ contracts/*/Cargo.lock
 *.swp
 *.swo
 *~
+packages/zkp-wasm/target/
+packages/zkp-wasm/Cargo.lock
+packages/zkp-wasm/pkg/

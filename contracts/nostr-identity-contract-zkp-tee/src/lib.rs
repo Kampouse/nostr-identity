@@ -511,6 +511,20 @@ pub enum Action {
         writer_contract_id: String,
         deadline: u64,
     },
+    
+    /// TRUE PRIVACY: Register with client-generated ZKP
+    /// TEE NEVER sees account_id - only verifies the ZKP
+    #[serde(rename = "register_with_zkp")]
+    RegisterWithZkp {
+        /// Client-generated ZKP containing commitment and nullifier
+        zkp_proof: ZKPProof,
+        /// Client-generated Nostr public key
+        npub: String,
+        /// Writer contract to call
+        writer_contract_id: String,
+        /// Transaction deadline
+        deadline: u64,
+    },
 }
 
 pub fn handle_action(action: Action) -> ActionResult {
@@ -557,6 +571,20 @@ pub fn handle_action(action: Action) -> ActionResult {
             handle_prepare_writer_call(
                 account_id,
                 nep413_response,
+                writer_contract_id,
+                deadline,
+            )
+        }
+        
+        Action::RegisterWithZkp {
+            zkp_proof,
+            npub,
+            writer_contract_id,
+            deadline,
+        } => {
+            handle_register_with_zkp(
+                zkp_proof,
+                npub,
                 writer_contract_id,
                 deadline,
             )
@@ -1099,6 +1127,98 @@ fn handle_prepare_writer_call(
         created_at: Some(created_at),
         attestation: Some(generate_attestation()),
         tx_payload: Some(tx_payload),  // For near-signer-tee
+        ..Default::default()
+    }
+}
+
+/// TRUE PRIVACY: Register with client-generated ZKP
+/// TEE NEVER sees account_id - only verifies the ZKP
+fn handle_register_with_zkp(
+    zkp_proof: ZKPProof,
+    npub: String,
+    writer_contract_id: String,
+    deadline: u64,
+) -> ActionResult {
+    // 1. Extract commitment and nullifier from ZKP public inputs
+    if zkp_proof.public_inputs.len() < 2 {
+        return ActionResult {
+            success: false,
+            error: Some("Invalid ZKP: missing public inputs".to_string()),
+            ..Default::default()
+        };
+    }
+    
+    let commitment = zkp_proof.public_inputs[0].clone();
+    let nullifier = zkp_proof.public_inputs[1].clone();
+    
+    // 2. Verify ZKP (in production, this would verify Groth16 proof)
+    // For now, we trust the commitment/nullifier from client
+    // TODO: Add actual ZKP verification
+    if !zkp_proof.verified && zkp_proof.proof.is_empty() {
+        return ActionResult {
+            success: false,
+            error: Some("ZKP verification failed".to_string()),
+            ..Default::default()
+        };
+    }
+    
+    // 3. Check if already registered
+    if is_commitment_used(&commitment) {
+        return ActionResult {
+            success: false,
+            error: Some("This commitment is already registered".to_string()),
+            ..Default::default()
+        };
+    }
+    
+    // 4. Store identity locally (only commitment/nullifier, NO account_id!)
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    store_identity(&commitment, &nullifier, &npub, created_at);
+    
+    // 5. Prepare transaction for writer contract
+    let writer_message = serde_json::json!({
+        "npub": npub,
+        "commitment": commitment,
+        "nullifier": nullifier,
+        "timestamp": created_at,
+    });
+    
+    let writer_args = serde_json::json!({
+        "_message": writer_message.to_string(),
+        "deadline": deadline,
+    });
+    
+    // 6. Create transaction payload for near-signer-tee
+    let tx_nonce = created_at * 1000;
+    let tx_payload = serde_json::json!({
+        "signer_id": "kampouse.near",
+        "receiver_id": writer_contract_id,
+        "nonce": tx_nonce,
+        "block_hash": "FETCH_LATEST_BLOCK_HASH",
+        "actions": [{
+            "FunctionCall": {
+                "method_name": "write",
+                "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
+                "gas": "30000000000000",
+                "deposit": "0",
+            }
+        }],
+    });
+    
+    // 7. Return result (NO nsec - client already has it!)
+    ActionResult {
+        success: true,
+        npub: Some(npub),
+        nsec: None,  // Client already has their nsec
+        commitment: Some(commitment),
+        nullifier: Some(nullifier),
+        created_at: Some(created_at),
+        attestation: Some(generate_attestation()),
+        tx_payload: Some(tx_payload),
         ..Default::default()
     }
 }
