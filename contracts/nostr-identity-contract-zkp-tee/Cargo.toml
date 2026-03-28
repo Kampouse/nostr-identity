@@ -6,10 +6,15 @@ edition = "2021"
 [features]
 default = []
 outlayer-tee = []  # Enable OutLayer TEE: persistent storage + NEAR contract calls + TEE signing
+local-test = ["minreq"]    # Local testing: uses file-backed storage + minreq for RPC
 
 [[bin]]
 name = "nostr-identity-zkp-tee"
 path = "src/main.rs"
+
+[[bin]]
+name = "test_helper"
+path = "src/bin/test_helper.rs"
 
 [lib]
 name = "nostr_identity_zkp_tee"
@@ -19,6 +24,9 @@ path = "src/lib.rs"
 # Crypto
 ed25519-dalek = "2.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
+
+# HTTP (for NEAR RPC calls - local-test mode only)
+minreq = { version = "2", features = ["https-rustls"], optional = true }
 
 # ZKP (Real zero-knowledge proofs)
 ark-groth16 = "0.4"

@@ -182,10 +182,10 @@ extern "C" {
 }
 
 // Helper: Get from persistent storage
-fn tee_storage_get(_key: &str) -> Option<String> {
+fn tee_storage_get(key: &str) -> Option<String> {
     #[cfg(feature = "outlayer-tee")]
     {
-        let key_bytes = _key.as_bytes();
+        let key_bytes = key.as_bytes();
         unsafe {
             let ptr = storage_get(key_bytes.as_ptr(), key_bytes.len());
             if ptr.is_null() {
@@ -196,20 +196,30 @@ fn tee_storage_get(_key: &str) -> Option<String> {
             Some(String::from_utf8_lossy(bytes).to_string())
         }
     }
-    
-    #[cfg(not(feature = "outlayer-tee"))]
+
+    #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
-        // Without outlayer-tee feature, use in-memory storage
+        // File-backed storage for local testing
+        let dir = std::env::var("LOCAL_STORAGE_DIR")
+            .unwrap_or_else(|_| "/tmp/nostr-identity-storage".to_string());
+        let safe_key = hex::encode(key.as_bytes());
+        let path = format!("{}/{}", dir, safe_key);
+        std::fs::read_to_string(&path).ok()
+    }
+
+    #[cfg(all(not(feature = "outlayer-tee"), not(feature = "local-test")))]
+    {
+        // No persistent storage in default mode
         None
     }
 }
 
 // Helper: Set persistent storage
-fn tee_storage_set(_key: &str, _value: &str) {
+fn tee_storage_set(key: &str, value: &str) {
     #[cfg(feature = "outlayer-tee")]
     {
-        let key_bytes = _key.as_bytes();
-        let value_bytes = _value.as_bytes();
+        let key_bytes = key.as_bytes();
+        let value_bytes = value.as_bytes();
         unsafe {
             storage_set(
                 key_bytes.as_ptr(),
@@ -219,10 +229,21 @@ fn tee_storage_set(_key: &str, _value: &str) {
             );
         }
     }
-    
-    #[cfg(not(feature = "outlayer-tee"))]
+
+    #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
-        // Without outlayer-tee feature, storage is in-memory only
+        // File-backed storage for local testing
+        let dir = std::env::var("LOCAL_STORAGE_DIR")
+            .unwrap_or_else(|_| "/tmp/nostr-identity-storage".to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        let safe_key = hex::encode(key.as_bytes());
+        let path = format!("{}/{}", dir, safe_key);
+        let _ = std::fs::write(&path, value);
+    }
+
+    #[cfg(all(not(feature = "outlayer-tee"), not(feature = "local-test")))]
+    {
+        // No persistent storage in default mode
     }
 }
 
@@ -257,16 +278,20 @@ fn verify_nep413_ownership(
     nep413_response: &Nep413AuthResponse,
 ) -> Result<(), String> {
     if nep413_response.account_id != account_id {
-        return Err(format!("Account ID mismatch"));
+        return Err("Account ID mismatch".to_string());
     }
 
     if nep413_response.auth_request.recipient != "nostr-identity.near" {
-        return Err(format!("Invalid recipient"));
+        return Err("Invalid recipient".to_string());
     }
 
+    // Step 1: Verify the public key actually belongs to this account on NEAR
+    verify_account_key_ownership(account_id, &nep413_response.public_key)?;
+
+    // Step 2: Parse and verify signature
     let sig_bytes = parse_signature(&nep413_response.signature)?;
     if sig_bytes.len() != 64 {
-        return Err(format!("Invalid signature length"));
+        return Err("Invalid signature length".to_string());
     }
 
     let signature = Signature::from_bytes(
@@ -288,7 +313,6 @@ fn verify_nep413_ownership(
     })).map_err(|e| format!("Failed to serialize message: {}", e))?;
 
     // Hash the message (NEP-413 spec)
-    // NEAR wallets sign SHA-256 hash of the message, not the raw message
     let mut hasher = Sha256::new();
     hasher.update(message.as_bytes());
     let message_hash = hasher.finalize();
@@ -300,17 +324,91 @@ fn verify_nep413_ownership(
     Ok(())
 }
 
+/// Verify that the public key is actually an access key for the account on NEAR
+/// This prevents someone from signing with an arbitrary key and claiming a different account_id
+fn verify_account_key_ownership(account_id: &str, public_key: &str) -> Result<(), String> {
+    if !public_key.starts_with("ed25519:") {
+        return Err("Invalid public key format".to_string());
+    }
+
+    let rpc_url = std::env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
+
+    let request_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dontcare",
+        "method": "query",
+        "params": {
+            "request_type": "view_access_key_list",
+            "finality": "final",
+            "account_id": account_id
+        }
+    });
+    let body_str = serde_json::to_string(&request_body).unwrap();
+
+    // Get RPC response via available method
+    let response_body = fetch_rpc(&rpc_url, &body_str);
+
+    match response_body {
+        Some(body) => {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(error) = parsed.get("error") {
+                    return Err(format!("RPC error: {}", error["message"].as_str().unwrap_or("unknown")));
+                }
+                if let Some(keys) = parsed["result"]["keys"].as_array() {
+                    let found = keys.iter().any(|k| {
+                        k["public_key"].as_str().map(|pk| pk == public_key).unwrap_or(false)
+                    });
+                    if !found {
+                        return Err(format!("{} is not an access key for {}", public_key, account_id));
+                    }
+                    return Ok(());
+                }
+            }
+            Err("Could not parse RPC response".to_string())
+        }
+        None => Err("RPC unavailable".to_string()),
+    }
+}
+
+/// Fetch RPC response - works in both local-test and OutLayer TEE
+/// Fetch RPC response
+/// In local-test mode: uses minreq (HTTP client)
+/// In OutLayer TEE: uses OutLayer HTTP host function
+fn fetch_rpc(url: &str, body: &str) -> Option<String> {
+    #[cfg(feature = "local-test")]
+    {
+        let resp = minreq::post(url)
+            .with_header("Content-Type", "application/json")
+            .with_body(body)
+            .send()
+            .ok()?;
+        Some(String::from_utf8_lossy(resp.as_bytes()).to_string())
+    }
+
+    #[cfg(not(feature = "local-test"))]
+    {
+        // OutLayer TEE provides http_post(url, body) -> Option<String>
+        // TODO: call OutLayer SDK when available
+        let _ = (url, body);
+        None
+    }
+}
+
 fn parse_signature(sig_str: &str) -> Result<Vec<u8>, String> {
     let sig_str = sig_str.strip_prefix("ed25519:").unwrap_or(sig_str);
-    hex::decode(sig_str)
-        .or_else(|_| STANDARD.decode(sig_str))
-        .map_err(|_| "Invalid signature format".to_string())
+    // NEAR uses base58 (bs58) encoding for signatures
+    bs58::decode(sig_str)
+        .into_vec()
+        .map_err(|e| format!("Invalid signature bs58: {}", e))
 }
 
 fn parse_public_key(pk_str: &str) -> Result<Vec<u8>, String> {
     let pk_str = pk_str.strip_prefix("ed25519:").unwrap_or(pk_str);
-    hex::decode(pk_str)
-        .map_err(|e| format!("Invalid public key hex: {}", e))
+    // NEAR uses base58 (bs58) encoding for public keys
+    bs58::decode(pk_str)
+        .into_vec()
+        .map_err(|e| format!("Invalid public key bs58: {}", e))
 }
 
 // ============================================================================
@@ -404,8 +502,10 @@ fn generate_nostr_keypair() -> Result<(String, String), String> {
         .map_err(|e| format!("Failed to create signing key: {}", e))?;
 
     let verifying_key = signing_key.verifying_key();
-    let pubkey_bytes = verifying_key.to_encoded_point(true);
-    let pubkey_hex = hex::encode(pubkey_bytes.as_bytes());
+    // NIP-01: pubkey is 32-byte x-only secp256k1 (lowercase hex)
+    let encoded = verifying_key.to_encoded_point(false); // uncompressed
+    let pubkey_bytes = &encoded.as_bytes()[1..33]; // skip 0x04 prefix, take x-coordinate
+    let pubkey_hex = hex::encode(pubkey_bytes);
 
     let privkey_hex = hex::encode(privkey_bytes);
 
@@ -527,6 +627,9 @@ pub enum Action {
         writer_contract_id: String,
         /// Transaction deadline
         deadline: u64,
+        /// Optional signing key (TESTING ONLY - INSECURE)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signing_key: Option<String>,
     },
 }
 
@@ -584,12 +687,14 @@ pub fn handle_action(action: Action) -> ActionResult {
             npub,
             writer_contract_id,
             deadline,
+            signing_key,
         } => {
             handle_register_with_zkp(
                 zkp_proof,
                 npub,
                 writer_contract_id,
                 deadline,
+                signing_key,
             )
         }
     }
@@ -1141,6 +1246,7 @@ fn handle_register_with_zkp(
     npub: String,
     writer_contract_id: String,
     deadline: u64,
+    signing_key: Option<String>,
 ) -> ActionResult {
     // 1. Extract commitment and nullifier from ZKP public inputs
     if zkp_proof.public_inputs.len() < 2 {
@@ -1216,6 +1322,7 @@ fn handle_register_with_zkp(
         writer_contract_id.to_string(),
         tx_nonce,
         actions,
+        signing_key,  // Pass optional key from input
     ) {
         Ok(tx) => tx,
         Err(e) => {
@@ -1280,13 +1387,15 @@ fn sign_transaction_with_near_key(
     receiver_id: String,
     nonce: u64,
     actions: Vec<serde_json::Value>,
+    signing_key: Option<String>,  // Optional key from input (TESTING ONLY)
 ) -> Result<serde_json::Value, String> {
     use sha2::{Sha256, Digest};
     use ed25519_dalek::Signer;
 
-    // Get private key from environment (set by OutLayer secrets)
-    let key_str = std::env::var("NEAR_PRIVATE_KEY")
-        .map_err(|_| "NEAR_PRIVATE_KEY not set in OutLayer secrets")?;
+    // Get private key from input OR environment (set by OutLayer secrets)
+    let key_str = signing_key
+        .or_else(|| std::env::var("NEAR_PRIVATE_KEY").ok())
+        .ok_or("NEAR_PRIVATE_KEY not provided (not in input and not in OutLayer secrets)")?;
 
     // Parse ed25519 private key
     let key_str = key_str.strip_prefix("ed25519:")
@@ -1295,10 +1404,20 @@ fn sign_transaction_with_near_key(
         .into_vec()
         .map_err(|e| format!("Failed to decode key: {}", e))?;
 
-    let secret_key = ed25519_dalek::SigningKey::from_bytes(
-        &key_bytes.try_into()
+    // NEAR uses 64-byte keys (32 seed + 32 public), ed25519-dalek needs 32-byte seed
+    let seed_bytes: [u8; 32] = if key_bytes.len() == 64 {
+        // NEAR format: take first 32 bytes (seed)
+        key_bytes[..32].try_into()
+            .map_err(|_| "Failed to extract seed")?
+    } else if key_bytes.len() == 32 {
+        // Already just the seed
+        key_bytes.try_into()
             .map_err(|_| "Invalid key length")?
-    );
+    } else {
+        return Err(format!("Invalid key length: {} (expected 32 or 64 bytes)", key_bytes.len()));
+    };
+
+    let secret_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
 
     // Build transaction data
     let mut tx_data = Vec::new();
