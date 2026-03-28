@@ -1,76 +1,61 @@
-# Nostr Identity - Monorepo
+# Nostr Identity
 
-**Secure Nostr identities bound to NEAR accounts with TEE + ZKP security**
+Privacy-preserving Nostr identity management on NEAR, powered by TEE (Trusted Execution Environment) and Zero-Knowledge Proofs.
 
----
-
-## 🏗️ Monorepo Structure
+## Structure
 
 ```
-nostr-identity/
-├── apps/
-│   └── web/                      # Frontend (Next.js)
-├── services/
-│   └── zkp/                      # ZKP implementation (Circom)
-├── contracts/
-│   ├── nostr-identity-contract/  # Basic TEE contract
-│   └── nostr-identity-contract-zkp-tee/  # Production ZKP+TEE contract
-├── packages/
-│   ├── crypto/                   # Shared cryptographic utilities
-│   ├── types/                    # Shared TypeScript types
-│   └── nostr/                    # Nostr protocol utilities
-├── archived/                     # Legacy/unused contracts and services
-└── docs/                         # Documentation
+contracts/
+  tee/         TEE WASM contract (OutLayer/wasmtime) — identity generation, recovery, ZKP verification
+  writer/      NEAR smart contract — writes Nostr events on-chain
+apps/web/      Next.js frontend
+packages/      Shared TypeScript packages (crypto, nostr, types, zkp)
+services/      Backend services
 ```
 
----
+## Quick Start
 
-## 🚀 Quick Start
+### Prerequisites
 
-### Development
+- Rust toolchain with `wasm32-wasip2` target
+- [wasmtime](https://wasmtime.dev/) (optional, for WASM testing)
+- Node.js 18+ (for apps/packages)
+
+### Build & Test (TEE Contract)
 
 ```bash
-# Install dependencies
-pnpm install
+# Run all tests locally
+./test_local.sh
 
-# Run frontend
-pnpm dev
+# Run via wasmtime (full WASM test)
+./test_local.sh --wasmtime
 
-# Build smart contract
-pnpm build:contract
+# Clean rebuild
+./test_local.sh --clean
+
+# Just cargo test
+cd contracts/tee && cargo test --features local-test
 ```
 
-### Deployment
+### Build & Test (Writer Contract)
 
 ```bash
-# Build everything
-pnpm build:all
-
-# Deploy frontend
-cd apps/web && vercel --prod
-
-# Deploy TEE contract
-cd contracts/nostr-identity-contract-zkp-tee
-cargo build --target wasm32-wasip2 --release
-outlayer deploy --name nostr-identity target/wasm32-wasip2/release/*.wasm
+cd contracts/writer && cargo test
 ```
 
----
+## Feature Flags (TEE Contract)
 
-## 📚 Documentation
+| Flag | Mode | Description |
+|------|------|-------------|
+| `local-test` | Development | File-backed storage, mock contract calls, deterministic keys |
+| `outlayer-tee` | Production | OutLayer host functions, persistent on-chain storage |
 
-- [Architecture Guide](./docs/ARCHITECTURE.md) - System architecture and flows
-- [Deployment Guide](./docs/DEPLOYMENT.md) - Complete deployment instructions
-- [Security](./docs/README.md) - Security model and guarantees
+## Architecture
 
----
+The TEE contract runs inside a WASM sandbox (wasmtime/OutLayer). It:
+1. Generates Nostr keypairs linked to NEAR accounts via NEP-413 signatures
+2. Produces ZK proofs of identity ownership without revealing the NEAR account
+3. Signs transactions for the writer contract to post Nostr events on-chain
+4. Supports identity recovery through re-authentication
 
-## 🔗 Live Demo
-
-https://nostr-identity.vercel.app
-
----
-
-## 📄 License
-
-MIT
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [DEPLOYMENT.md](DEPLOYMENT.md) for details.

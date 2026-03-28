@@ -1,0 +1,5 @@
+error: unexpected argument '-3' found
+
+Usage: cargo-near near build non-reproducible-wasm [OPTIONS]
+
+For more information, try '--help'.
