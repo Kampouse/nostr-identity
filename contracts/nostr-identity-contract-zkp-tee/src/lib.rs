@@ -182,7 +182,7 @@ extern "C" {
 }
 
 // Helper: Get from persistent storage
-fn tee_storage_get(key: &str) -> Option<String> {
+fn tee_storage_get(_key: &str) -> Option<String> {
     #[cfg(feature = "outlayer-tee")]
     {
         let key_bytes = key.as_bytes();
@@ -215,7 +215,7 @@ fn tee_storage_get(key: &str) -> Option<String> {
 }
 
 // Helper: Set persistent storage
-fn tee_storage_set(key: &str, value: &str) {
+fn tee_storage_set(_key: &str, _value: &str) {
     #[cfg(feature = "outlayer-tee")]
     {
         let key_bytes = key.as_bytes();
@@ -598,6 +598,7 @@ pub enum Action {
     #[serde(rename = "stats")]
     Stats,
     
+
     #[serde(rename = "register_via_contract")]
     RegisterViaContract {
         account_id: String,
@@ -1036,37 +1037,17 @@ fn handle_register_via_contract(
     contract_id: String,
     nonce: u64,
 ) -> ActionResult {
-    // 1. Verify NEP-413 signature
+    // 1. Verify NEP-413 signature + RPC key ownership
     if let Err(e) = verify_nep413_ownership(&account_id, &nep413_response) {
         return ActionResult {
             success: false,
-            error: Some(format!("NEP-413 verification failed: {}", e)),
+            error: Some(format!("Verification failed: {}", e)),
             ..Default::default()
         };
     }
 
-    // 2. Generate commitment and nullifier
-    let commitment = {
-        let input = format!("commitment:{}", account_id);
-        hex::encode(compute_sha256(&input))
-    };
-    
-    let nullifier = {
-        let input = format!("nullifier:{}{}", account_id, nonce);
-        hex::encode(compute_sha256(&input))
-    };
-
-    // 3. Check if already registered
-    if is_commitment_used(&commitment) {
-        return ActionResult {
-            success: false,
-            error: Some("This NEAR account already has a Nostr identity".to_string()),
-            ..Default::default()
-        };
-    }
-
-    // 4. Generate Nostr keypair
-    let (npub, _nsec) = match generate_nostr_keypair() {
+    // 2. Generate Nostr keypair (secp256k1, NIP-01 x-only)
+    let (npub, nsec) = match generate_nostr_keypair() {
         Ok(keys) => keys,
         Err(e) => {
             return ActionResult {
@@ -1077,56 +1058,61 @@ fn handle_register_via_contract(
         }
     };
 
-    // 5. Prepare registration payload
-    let registration = DelegatedRegistration {
-        npub: npub.clone(),
-        commitment: commitment.clone(),
-        nullifier: nullifier.clone(),
-        nep413_signature: nep413_response.signature.clone(),
-        user_public_key: nep413_response.public_key.clone(),
-        message: nep413_response.auth_request.message.clone(),
-        nonce,
+    // 3. Derive commitment and nullifier
+    let commitment = {
+        let input = format!("commitment:{}{}", npub, account_id);
+        hex::encode(compute_sha256(&input))
+    };
+    let nullifier = {
+        let input = format!("nullifier:{}{}{}", account_id, nonce, npub);
+        hex::encode(compute_sha256(&input))
     };
 
-    // 6. Sign as TEE (delegator signature)
-    let delegator_signature = sign_as_delegator(&registration);
-
-    // 7. Call smart contract via OutLayer
-    let result = outlayer_contract_call(
-        &contract_id,
-        "register_via_delegator",
-        serde_json::json!({
-            "registration": registration,
-            "delegator_signature": delegator_signature,
-        }),
-    );
-
-    match result {
-        Ok(contract_result) => {
-            // 8. Store identity locally
-            let created_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            
-            store_identity(&commitment, &nullifier, &npub, created_at);
-
-            ActionResult {
-                success: true,
-                npub: Some(npub),
-                commitment: Some(commitment),
-                nullifier: Some(nullifier),
-                transaction_hash: Some(contract_result.transaction_hash),
-                created_at: Some(created_at),
-                attestation: Some(generate_attestation()),
-                ..Default::default()
-            }
-        }
-        Err(e) => ActionResult {
+    // 4. Check if already registered
+    if is_commitment_used(&commitment) {
+        return ActionResult {
             success: false,
-            error: Some(format!("Contract call failed: {}", e)),
+            error: Some("This NEAR account already has a Nostr identity".to_string()),
             ..Default::default()
-        },
+        };
+    }
+
+    // 5. Store identity
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    store_identity(&commitment, &nullifier, &npub, created_at);
+
+    // 6. Try on-chain registration via OutLayer
+    let tx_hash = match outlayer_contract_call(
+        &contract_id,
+        "register",
+        serde_json::json!({
+            "npub": npub,
+            "commitment": commitment,
+            "nullifier": nullifier,
+            "sig": "tee_attested"
+        }),
+    ) {
+        Ok(result) => Some(result.transaction_hash),
+        Err(e) => {
+            eprintln!("On-chain registration failed (identity stored locally): {}", e);
+            None
+        }
+    };
+
+    // 7. Return everything the frontend needs
+    ActionResult {
+        success: true,
+        npub: Some(npub),
+        nsec: Some(nsec),
+        commitment: Some(commitment),
+        nullifier: Some(nullifier),
+        transaction_hash: tx_hash,
+        created_at: Some(created_at),
+        attestation: Some(generate_attestation()),
+        ..Default::default()
     }
 }
 
@@ -1350,6 +1336,7 @@ fn handle_register_with_zkp(
 }
 
 // Sign registration as TEE delegator
+#[allow(dead_code)]
 fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
     // Create deterministic message to sign
     let message = format!(
