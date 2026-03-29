@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { encodeBech32, generateNostrKeypair, hexToBytes, bytesToHex } from '@nostr-identity/crypto'
-import type { TeeResponse } from '@nostr-identity/types'
+import { registerIdentityWithZKP } from './actions'
 
 // ZKP WASM - client-side proof generation
 let zkpWasm: any = null
@@ -16,9 +16,6 @@ async function initZKP() {
   }
   return zkpWasm
 }
-
-// TEE Backend URL (update after deployment)
-const TEE_URL = process.env.NEXT_PUBLIC_TEE_URL || 'https://p.outlayer.fastnear.com/execute'
 
 export default function Home() {
   const [connector, setConnector] = useState<NearConnector | null>(null)
@@ -153,38 +150,14 @@ export default function Home() {
         throw new Error('Invalid ZKP proof: missing required fields')
       }
 
-      // 4. Send ONLY public data to TEE — no nsec, no account_id
-      console.log('📡 Sending to TEE:', TEE_URL)
-      const contractId = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
-      const deadline = Math.floor(Date.now() / 1000) + 3600 // 1 hour
-
-      const requestBody = {
-        action: 'register_with_zkp',
-        npub: keypair.publicKeyHex,        // public key only
-        zkp_proof: {
-          proof: proofResult.proof,          // ZKP proof (doesn't reveal nsec)
-          public_inputs: [
-            proofResult.commitment,          // commitment hash
-            proofResult.nullifier            // nullifier hash
-          ],
-          verified: true,
-          timestamp: Math.floor(Date.now() / 1000)
-        },
-        writer_contract_id: contractId,
-        deadline: deadline
-      }
-
-      console.log('📦 Request body:', JSON.stringify(requestBody, null, 2))
-
-      const response = await fetch(TEE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
+      // 4. Send ONLY public data to TEE via server action — no nsec, no account_id
+      console.log('📡 Calling server action to register with TEE...')
+      const data = await registerIdentityWithZKP({
+        npub: keypair.publicKeyHex,
+        proof: proofResult.proof,
+        commitment: proofResult.commitment,
+        nullifier: proofResult.nullifier,
       })
-
-      console.log('📡 TEE Response status:', response.status)
-      const data: TeeResponse = await response.json()
-      console.log('📦 TEE Response data:', JSON.stringify(data, null, 2))
 
       if (!data.success) {
         throw new Error(data.error || 'Failed to register identity')
