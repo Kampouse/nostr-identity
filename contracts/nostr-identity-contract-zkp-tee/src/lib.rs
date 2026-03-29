@@ -347,51 +347,54 @@ fn verify_account_key_ownership(account_id: &str, public_key: &str) -> Result<()
     let body_str = serde_json::to_string(&request_body).unwrap();
 
     // Get RPC response via available method
-    let response_body = fetch_rpc(&rpc_url, &body_str);
+    let response_body = match fetch_rpc(&rpc_url, &body_str) {
+        Ok(body) => body,
+        Err(e) => return Err(format!("RPC call failed: {}", e)),
+    };
 
-    match response_body {
-        Some(body) => {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(error) = parsed.get("error") {
-                    return Err(format!("RPC error: {}", error["message"].as_str().unwrap_or("unknown")));
-                }
-                if let Some(keys) = parsed["result"]["keys"].as_array() {
-                    let found = keys.iter().any(|k| {
-                        k["public_key"].as_str().map(|pk| pk == public_key).unwrap_or(false)
-                    });
-                    if !found {
-                        return Err(format!("{} is not an access key for {}", public_key, account_id));
-                    }
-                    return Ok(());
-                }
-            }
-            Err("Could not parse RPC response".to_string())
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response_body) {
+        if let Some(error) = parsed.get("error") {
+            return Err(format!("RPC error: {}", error["message"].as_str().unwrap_or("unknown")));
         }
-        None => Err("RPC unavailable".to_string()),
+        if let Some(keys) = parsed["result"]["keys"].as_array() {
+            let found = keys.iter().any(|k| {
+                k["public_key"].as_str().map(|pk| pk == public_key).unwrap_or(false)
+            });
+            if !found {
+                return Err(format!("{} is not an access key for {}", public_key, account_id));
+            }
+            return Ok(());
+        }
     }
+    Err("Could not parse RPC response".to_string())
 }
 
 /// Fetch RPC response - works in both local-test and OutLayer TEE
 /// Fetch RPC response
 /// In local-test mode: uses minreq (HTTP client)
 /// In OutLayer TEE: uses OutLayer HTTP host function
-fn fetch_rpc(url: &str, body: &str) -> Option<String> {
+fn fetch_rpc(url: &str, body: &str) -> Result<String, String> {
     #[cfg(feature = "local-test")]
     {
         let resp = minreq::post(url)
             .with_header("Content-Type", "application/json")
             .with_body(body)
             .send()
-            .ok()?;
-        Some(String::from_utf8_lossy(resp.as_bytes()).to_string())
+            .map_err(|e| format!("minreq HTTP error: {:?}", e))?;
+        Ok(String::from_utf8_lossy(resp.as_bytes()).to_string())
     }
 
     #[cfg(not(feature = "local-test"))]
     {
-        // OutLayer TEE provides http_post(url, body) -> Option<String>
-        // TODO: call OutLayer SDK when available
-        let _ = (url, body);
-        None
+        use wasi_http_client::*;
+        let resp = Client::new()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body.as_bytes())
+            .send()
+            .map_err(|e| format!("wasi-http-client error: {:?}", e))?;
+        let body_bytes = resp.body().map_err(|e| format!("body read error: {:?}", e))?;
+        Ok(String::from_utf8_lossy(&body_bytes).to_string())
     }
 }
 
@@ -1320,7 +1323,7 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 6. Submit the signed transaction to NEAR RPC from within TEE
+    // 6. Submit the signed transaction to NEAR RPC
     let tx_hash = match submit_transaction_to_near_rpc(&signed_tx) {
         Ok(hash) => hash,
         Err(e) => {
@@ -1336,13 +1339,13 @@ fn handle_register_with_zkp(
     ActionResult {
         success: true,
         npub: Some(npub),
-        nsec: None,  // Client already has their nsec
+        nsec: None,
         commitment: Some(commitment),
         nullifier: Some(nullifier),
         created_at: Some(created_at),
         attestation: Some(generate_attestation()),
         transaction_hash: Some(tx_hash),
-        signed_transaction: Some(signed_tx),  // Also include for reference
+        signed_transaction: Some(signed_tx),
         ..Default::default()
     }
 }
@@ -1384,91 +1387,178 @@ fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
 fn sign_transaction_with_near_key(
     signer_id: String,
     receiver_id: String,
-    nonce: u64,
+    _nonce: u64,
     actions: Vec<serde_json::Value>,
-    signing_key: Option<String>,  // Optional key from input (TESTING ONLY)
+    signing_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    use sha2::{Sha256, Digest};
     use ed25519_dalek::Signer;
+    use crate::near_tx::*;
 
-    // Get private key from input OR environment (set by OutLayer secrets)
+    // Get private key
     let key_str = signing_key
         .or_else(|| std::env::var("NEAR_PRIVATE_KEY").ok())
-        .ok_or("NEAR_PRIVATE_KEY not provided (not in input and not in OutLayer secrets)")?;
-
-    // Parse ed25519 private key
+        .ok_or("NEAR_PRIVATE_KEY not provided")?;
     let key_str = key_str.strip_prefix("ed25519:")
-        .ok_or("Invalid key format - must start with ed25519:")?;
-    let key_bytes = bs58::decode(key_str)
-        .into_vec()
-        .map_err(|e| format!("Failed to decode key: {}", e))?;
-
-    // NEAR uses 64-byte keys (32 seed + 32 public), ed25519-dalek needs 32-byte seed
-    let seed_bytes: [u8; 32] = if key_bytes.len() == 64 {
-        // NEAR format: take first 32 bytes (seed)
-        key_bytes[..32].try_into()
-            .map_err(|_| "Failed to extract seed")?
+        .ok_or("Invalid key format")?;
+    let key_bytes = bs58::decode(key_str).into_vec()
+        .map_err(|e| format!("Key decode: {}", e))?;
+    let seed: [u8; 32] = if key_bytes.len() == 64 {
+        key_bytes[..32].try_into().unwrap()
     } else if key_bytes.len() == 32 {
-        // Already just the seed
-        key_bytes.try_into()
-            .map_err(|_| "Invalid key length")?
+        key_bytes.try_into().unwrap()
     } else {
-        return Err(format!("Invalid key length: {} (expected 32 or 64 bytes)", key_bytes.len()));
+        return Err(format!("Bad key length: {}", key_bytes.len()));
     };
+    let secret_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let verifying_key = secret_key.verifying_key();
+    let pub_key_b58 = format!("ed25519:{}", bs58::encode(verifying_key.as_bytes()).into_string());
 
-    let secret_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    // Fetch block hash and access key nonce
+    let (block_hash, ak_nonce) = fetch_block_and_nonce(&signer_id, &pub_key_b58)?;
+    let tx_nonce = ak_nonce + 1;
 
-    // Build transaction data
-    let mut tx_data = Vec::new();
-    tx_data.extend_from_slice(signer_id.as_bytes());
-    tx_data.extend_from_slice(receiver_id.as_bytes());
-    tx_data.extend_from_slice(&nonce.to_le_bytes());
-
-    // Add actions
+    // Parse actions from JSON
+    let mut tx_actions: Vec<Action> = Vec::new();
     for action in &actions {
-        tx_data.extend_from_slice(&action.to_string().as_bytes());
+        if let Some(fc) = action.get("FunctionCall") {
+            let method_name = fc.get("method_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let args_b64 = fc.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let args_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, args_b64)
+                .unwrap_or_default();
+            let gas: u64 = fc.get("gas").and_then(|v| v.as_u64()).unwrap_or(30000000000000);
+            let deposit: u128 = fc.get("deposit")
+                .and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(0);
+            tx_actions.push(Action::FunctionCall(FunctionCallAction {
+                method_name, args: args_bytes, gas, deposit,
+            }));
+        }
     }
 
-    // Hash the transaction data
-    let mut hasher = Sha256::new();
-    hasher.update(&tx_data);
-    let tx_hash = hasher.finalize();
+    // Build Transaction with proper borsh types
+    let tx = Transaction {
+        signer_id: signer_id.clone(),
+        public_key: PublicKey::ED25519(*verifying_key.as_bytes()),
+        nonce: tx_nonce,
+        receiver_id: receiver_id.clone(),
+        block_hash,
+        actions: tx_actions,
+    };
 
-    // Sign the hash (need to convert to 32-byte array)
-    let tx_hash_array: [u8; 32] = tx_hash.try_into()
-        .map_err(|_| "Hash length mismatch")?;
+    // Borsh serialize the transaction and hash it
+    let tx_bytes = borsh::to_vec(&tx)
+        .map_err(|e| format!("Tx borsh: {}", e))?;
+    let tx_hash: [u8; 32] = Sha256::digest(&tx_bytes).try_into().unwrap();
+    let signature = secret_key.sign(&tx_hash);
 
-    // Sign using the transaction hash
-    let signature = secret_key.sign(&tx_hash_array);
+    // Build SignedTransaction (transaction first, signature after - nearcore order)
+    let signed_tx = SignedTransaction {
+        transaction: tx,
+        signature: Signature::ED25519(signature.to_bytes()),
+    };
 
-    // Return signed transaction
+    let signed_bytes = borsh::to_vec(&signed_tx)
+        .map_err(|e| format!("Signed borsh: {}", e))?;
+    let borsh_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signed_bytes);
+
     Ok(serde_json::json!({
+        "borsh_base64": borsh_b64,
         "transaction": {
             "signer_id": signer_id,
             "receiver_id": receiver_id,
-            "nonce": nonce,
+            "nonce": tx_nonce,
             "actions": actions,
+            "block_hash": bs58::encode(&block_hash).into_string(),
         },
         "signature": format!("ed25519:{}", bs58::encode(signature.to_bytes()).into_string()),
-        "public_key": format!("ed25519:{}", bs58::encode(secret_key.verifying_key().as_bytes()).into_string()),
-        "hash": hex::encode(tx_hash),
+        "public_key": pub_key_b58,
+        "hash": hex::encode(&tx_hash),
     }))
+}
+
+fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32], u64), String> {
+    let rpc_url = std::env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+
+    // Fetch latest block
+    let block_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": "block",
+        "method": "block", "params": {"finality": "final"}
+    });
+    let block_body = serde_json::to_string(&block_req).map_err(|e| format!("Ser: {}", e))?;
+    let block_resp = fetch_rpc(&rpc_url, &block_body).map_err(|e| format!("Block RPC: {}", e))?;
+    let block_json: serde_json::Value = serde_json::from_str(&block_resp).map_err(|e| format!("Block parse: {}", e))?;
+    let hash_b58 = block_json["result"]["header"]["hash"].as_str().ok_or("No block hash")?;
+    let block_hash: [u8; 32] = bs58::decode(hash_b58).into_vec().map_err(|e| format!("Hash bs58: {}", e))?
+        .try_into().map_err(|_| "Bad hash len")?;
+
+    // Fetch access key
+    let ak_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": "ak",
+        "method": "query", "params": {
+            "request_type": "view_access_key", "finality": "final",
+            "account_id": account_id, "public_key": public_key
+        }
+    });
+    let ak_body = serde_json::to_string(&ak_req).map_err(|e| format!("Ser: {}", e))?;
+    let ak_resp = fetch_rpc(&rpc_url, &ak_body).map_err(|e| format!("AK RPC: {}", e))?;
+    let ak_json: serde_json::Value = serde_json::from_str(&ak_resp).map_err(|e| format!("AK parse: {}", e))?;
+    let nonce: u64 = ak_json["result"]["nonce"].as_u64().ok_or("No nonce")?;
+
+    Ok((block_hash, nonce))
+}
+
+fn fetch_block_hash() -> Result<[u8; 32], String> {
+    let rpc_url = std::env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+    
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dontcare",
+        "method": "block",
+        "params": {"finality": "final"}
+    });
+    
+    let body = serde_json::to_string(&request)
+        .map_err(|e| format!("Serialize error: {}", e))?;
+    
+    let response = fetch_rpc(&rpc_url, &body)
+        .map_err(|e| format!("Block hash fetch failed: {}", e))?;
+    
+    let parsed: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|e| format!("Parse error: {}. Raw: {} ({} bytes)", e, &response[..200.min(response.len())], response.len()))?;
+    
+    let hash_b58 = parsed.get("result")
+        .and_then(|r| r.get("header"))
+        .and_then(|h| h.get("hash"))
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| format!("No block hash in response. Keys: {:?}", parsed.as_object().map(|m| m.keys().collect::<Vec<_>>())))?;
+    
+    let hash_bytes = bs58::decode(hash_b58)
+        .into_vec()
+        .map_err(|e| format!("bs58 decode error on '{}': {}", &hash_b58[..20.min(hash_b58.len())], e))?;
+    
+    let block_hash: [u8; 32] = hash_bytes.try_into()
+        .map_err(|_| "Block hash wrong length")?;
+    
+    Ok(block_hash)
 }
 
 // Submit signed transaction to NEAR RPC
 fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<String, String> {
-    use std::env;
+    let rpc_url = std::env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
 
-    // Get RPC URL from environment (defaults to lava.build mainnet)
-    let rpc_url = env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://near.lava.build".to_string());
+    // Get borsh base64 encoded signed transaction
+    let borsh_b64 = signed_tx.get("borsh_base64")
+        .and_then(|v| v.as_str())
+        .ok_or("No borsh_base64 in signed transaction")?;
 
-    // Build RPC request
+    // Build RPC request - params is [base64_of_borsh_signed_tx]
     let rpc_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "dontcare",
         "method": "broadcast_tx_commit",
-        "params": [signed_tx]
+        "params": [borsh_b64]
     });
 
     let request_body = serde_json::to_string(&rpc_request)
@@ -1476,7 +1566,7 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
 
     // Submit to RPC
     let response_body = fetch_rpc(&rpc_url, &request_body)
-        .ok_or("Failed to connect to NEAR RPC")?;
+        .map_err(|e| format!("RPC call to {} failed: {}", rpc_url, e))?;
 
     // Parse response
     let response: serde_json::Value = serde_json::from_str(&response_body)
@@ -1677,3 +1767,4 @@ mod tests {
         assert_eq!(result2.verified, Some(true));
     }
 }
+pub mod near_tx;
