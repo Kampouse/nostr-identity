@@ -1459,9 +1459,9 @@ fn sign_transaction_with_near_key(
 fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<String, String> {
     use std::env;
 
-    // Get RPC URL from environment (defaults to mainnet eth-rpc)
+    // Get RPC URL from environment (defaults to lava.build mainnet)
     let rpc_url = env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://eth-rpc.mainnet.near.org".to_string());
+        .unwrap_or_else(|_| "https://near.lava.build".to_string());
 
     // Build RPC request
     let rpc_request = serde_json::json!({
