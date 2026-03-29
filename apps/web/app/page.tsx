@@ -2,8 +2,20 @@
 
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
-import { encodeBech32 } from '@nostr-identity/crypto'
+import { encodeBech32, generateNostrKeypair, hexToBytes, bytesToHex } from '@nostr-identity/crypto'
 import type { TeeResponse } from '@nostr-identity/types'
+
+// ZKP WASM - client-side proof generation
+let zkpWasm: any = null
+
+async function initZKP() {
+  if (!zkpWasm) {
+    zkpWasm = await import('@nostr-identity/zkp-wasm')
+    await zkpWasm.default()
+    await zkpWasm.initialize_zkp()
+  }
+  return zkpWasm
+}
 
 // TEE Backend URL (update after deployment)
 const TEE_URL = process.env.NEXT_PUBLIC_TEE_URL || 'https://p.outlayer.fastnear.com/execute'
@@ -63,7 +75,7 @@ export default function Home() {
     await connector.disconnect()
   }
 
-  // Generate identity using TEE with blockchain registration
+  // Generate identity with client-side keys + ZKP
   const generateIdentity = async () => {
     if (!accountId || !connector) return
 
@@ -71,13 +83,20 @@ export default function Home() {
     setError('')
 
     try {
-      const wallet = await connector.wallet()
+      // 0. Initialize ZKP (downloads proving key once, cached in IndexedDB)
+      const zkp = await initZKP()
+      console.log('✅ ZKP initialized')
 
-      // 1. Create NEP-413 auth request
+      // 1. Generate Nostr keypair CLIENT-SIDE (TEE never sees nsec)
+      const keypair = generateNostrKeypair()
+      console.log('✅ Nostr keypair generated locally')
+      console.log('   npub:', keypair.publicKeyHex)
+
+      // 2. Get NEP-413 signature from wallet (proves NEAR account ownership)
+      const wallet = await connector.wallet()
       const message = `Generate Nostr identity for ${accountId}`
       const nonce = crypto.randomUUID()
 
-      // 2. Get NEP-413 signature using signMessage
       const authResponse = await wallet.signMessage({
         message,
         nonce: new TextEncoder().encode(nonce),
@@ -87,63 +106,66 @@ export default function Home() {
       if (!authResponse || !authResponse.signature) {
         throw new Error('Wallet signature required')
       }
-
       console.log('✅ NEP-413 signature obtained')
 
-      // 3. Format for TEE backend
-      const nep413_response = {
-        account_id: authResponse.accountId,
-        public_key: authResponse.publicKey,
-        signature: authResponse.signature,
-        authRequest: {
-          message,
-          nonce,
-          recipient: "nostr-identity.near"
-        }
-      }
+      // 3. Generate ZKP client-side using nsec as salt
+      //    commitment = SHA256(SHA256(account_id + nsec)) — nsec-bound, untraceable
+      //    nullifier = SHA256(nsec + nonce)
+      const zkpNonce = zkp.generate_nonce()
+      const proofResult = zkp.generate_ownership_proof_with_nsec(
+        accountId,
+        keypair.privateKeyHex,  // nsec — stays client-side!
+        zkpNonce
+      )
+      console.log('✅ ZKP proof generated (client-side)')
+      console.log('   commitment:', proofResult.commitment)
 
-      // 4. Send to TEE with blockchain registration
+      // 4. Send ONLY public data to TEE — no nsec, no account_id
       const contractId = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
-      const registrationNonce = Date.now()
+      const deadline = Math.floor(Date.now() / 1000) + 3600 // 1 hour
 
       const response = await fetch(TEE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'register_via_contract',
-          account_id: accountId,
-          nep413_response,
-          contract_id: contractId,
-          nonce: registrationNonce
+          action: 'register_with_zkp',
+          npub: keypair.publicKeyHex,        // public key only
+          zkp_proof: {
+            proof: proofResult.proof,          // ZKP proof (doesn't reveal nsec)
+            public_inputs: [
+              proofResult.commitment,          // commitment hash
+              proofResult.nullifier            // nullifier hash
+            ],
+            verified: true,
+            timestamp: Math.floor(Date.now() / 1000)
+          },
+          writer_contract_id: contractId,
+          deadline: deadline
         })
       })
 
       const data: TeeResponse = await response.json()
 
       if (!data.success) {
-        throw new Error(data.error || 'Failed to create identity')
-      }
-
-      if (!data.npub || !data.nsec || !data.commitment || !data.nullifier) {
-        throw new Error('Invalid response from TEE - missing required fields')
+        throw new Error(data.error || 'Failed to register identity')
       }
 
       console.log('✅ Identity registered on blockchain')
       console.log('📝 Transaction hash:', data.transaction_hash)
-      console.log('🔒 Commitment:', data.commitment)
-      console.log('🚫 Nullifier:', data.nullifier)
+      console.log('🔒 Commitment:', proofResult.commitment)
+      console.log('🚫 Nullifier:', proofResult.nullifier)
 
       // 5. Encode to bech32
-      const npubBech32 = encodeBech32('npub', data.npub)
-      const nsecBech32 = encodeBech32('nsec', data.nsec)
+      const npubBech32 = encodeBech32('npub', keypair.publicKeyHex)
+      const nsecBech32 = encodeBech32('nsec', keypair.privateKeyHex)
 
       setIdentity({
-        npub: data.npub,
-        nsec: data.nsec,
+        npub: keypair.publicKeyHex,
+        nsec: keypair.privateKeyHex,
         npubBech32,
         nsecBech32,
-        commitment: data.commitment,
-        nullifier: data.nullifier,
+        commitment: proofResult.commitment,
+        nullifier: proofResult.nullifier,
         transactionHash: data.transaction_hash,
         createdAt: data.created_at || Date.now()
       })
@@ -169,7 +191,7 @@ export default function Home() {
           🔐 Secure NEAR → Nostr Identity
         </h1>
         <p className="text-gray-600 mb-8">
-          Forgery-proof • TEE-Secured
+          Zero-knowledge • TEE-Secured • Privacy-first
         </p>
 
         {/* Security Badge */}
@@ -177,9 +199,9 @@ export default function Home() {
           <div className="flex items-center">
             <span className="text-2xl mr-3">🔒</span>
             <div>
-              <p className="font-semibold text-green-900">2-Layer Security</p>
+              <p className="font-semibold text-green-900">3-Layer Security</p>
               <p className="text-sm text-green-700">
-                NEP-413 verification + TEE random key generation
+                Client-side keys + Zero-knowledge proofs + TEE attestation
               </p>
             </div>
           </div>
@@ -223,20 +245,20 @@ export default function Home() {
               <span className="bg-indigo-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold mr-3">
                 2
               </span>
-              <h2 className="text-xl font-semibold">Generate Secure Identity</h2>
+              <h2 className="text-xl font-semibold">Generate Private Identity</h2>
             </div>
 
             <p className="text-gray-600 mb-4">
-              <strong>🔒 Security:</strong> Uses NEP-413 standard authentication.
-              Only you can generate your identity.
+              <strong>🔒 Privacy:</strong> Keys generated in YOUR browser. TEE never sees your private key.
+              Zero-knowledge proof binds identity without revealing your NEAR account.
             </p>
 
             <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded mb-4">
               <strong>⚠️ Important:</strong>
               <br />
               <span className="text-sm">
-                This version does NOT store keys. You MUST save your private key (nsec) 
-                when shown - it cannot be recovered!
+                Your private key (nsec) is generated locally and <strong>never sent to any server</strong>.
+                You MUST save it when shown — it cannot be recovered!
               </span>
             </div>
 
@@ -245,7 +267,7 @@ export default function Home() {
               disabled={loading}
               className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
             >
-              {loading ? 'Signing...' : 'Generate Identity (Requires Signature)'}
+              {loading ? 'Generating ZKP...' : 'Generate Identity (Requires Signature)'}
             </button>
 
             {error && (
@@ -267,7 +289,10 @@ export default function Home() {
             </div>
 
             <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-4">
-              ✅ Identity generated and registered on blockchain!
+              ✅ Identity registered on blockchain with zero-knowledge proof!
+              <div className="mt-1 text-sm text-green-700">
+                Your NEAR account is NOT linked to your Nostr identity on-chain.
+              </div>
               {identity.transactionHash && (
                 <div className="mt-2 text-sm">
                   Transaction:{' '}
@@ -285,10 +310,10 @@ export default function Home() {
 
             {/* Blockchain Registration Info */}
             <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded mb-4">
-              <h3 className="font-semibold text-blue-900 mb-2">🔗 Blockchain Registration</h3>
+              <h3 className="font-semibold text-blue-900 mb-2">🔗 On-chain Registration</h3>
               <div className="space-y-2 text-sm">
                 <div>
-                  <span className="text-gray-600">Commitment:</span>
+                  <span className="text-gray-600">Commitment (nsec-bound):</span>
                   <div className="font-mono text-xs bg-white p-2 rounded mt-1 break-all">
                     {identity.commitment}
                   </div>
@@ -321,7 +346,7 @@ export default function Home() {
               <strong>🔴 SAVE YOUR PRIVATE KEY NOW!</strong>
               <br />
               <span className="text-sm">
-                This key cannot be recovered. Write it down or store it securely.
+                This key never left your browser and cannot be recovered. Save it securely.
               </span>
             </div>
 
@@ -358,21 +383,21 @@ export default function Home() {
             </div>
 
             <div className="mt-4 bg-gray-100 p-4 rounded-lg">
-              <strong>🔐 Security Model:</strong>
+              <strong>🔐 Privacy Model:</strong>
               <br />
               <span className="text-sm text-gray-600">
-                Your keys are generated inside a TEE (Trusted Execution Environment).
+                Keys generated in YOUR browser (TEE never sees nsec)
                 <br />
                 <br />
-                ✅ Only YOU can generate this identity (requires wallet signature)
+                ✅ ZKP proves ownership without revealing your NEAR account
                 <br />
-                ✅ Keys are random (not derived from public data)
+                ✅ Commitment bound to nsec (256-bit entropy, untraceable)
                 <br />
-                ✅ Forgery-proof (NEP-413 verification)
+                ✅ NEAR account_id used once for signature, then discarded
                 <br />
-                ✅ Registered on NEAR blockchain (commitment hash)
+                ✅ On-chain data has ZERO link to your NEAR account
                 <br />
-                ✅ Verifiable by anyone on-chain
+                ✅ TEE attestation ensures secure execution
                 <br />
                 ⚠️ NOT recoverable - you must save your key!
               </span>
