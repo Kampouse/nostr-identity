@@ -1,0 +1,42 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build artifacts
+.next
+out
+dist
+build
+
+# Testing
+coverage
+.nyc_output
+
+# Misc
+.DS_Store
+*.pem
+*.log
+
+# Git
+.git
+
+# Contracts
+contracts/*/target
+**/*.lock
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# WASM build artifacts (should be built during deploy)
+packages/zkp-wasm/pkg
+packages/zkp-wasm/target
+target
+
+# Lock files (except pnpm-lock.yaml)
+bun.lock
+package-lock.json
+yarn.lock
