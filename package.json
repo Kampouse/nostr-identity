@@ -8,8 +8,11 @@
     "packages/*"
   ],
   "scripts": {
+    "postinstall": "pnpm build:packages",
     "dev": "pnpm --filter @nostr-identity/web dev",
-    "build": "pnpm --filter ./packages/** build && pnpm --filter @nostr-identity/web build",
+    "build:wasm": "cd packages/zkp-wasm && wasm-pack build --target web --out-dir pkg",
+    "build:packages": "pnpm build:wasm && pnpm --filter @nostr-identity/crypto build && pnpm --filter @nostr-identity/types build && pnpm --filter @nostr-identity/nostr build",
+    "build": "pnpm build:packages && pnpm --filter @nostr-identity/web build",
     "build:contract": "cd contracts/nostr-identity-contract-zkp-tee && cargo build --target wasm32-wasip2 --release",
     "build:all": "pnpm build:contract && pnpm build",
     "start": "pnpm --filter @nostr-identity/web start",

@@ -1,6 +1,5 @@
 use wasm_bindgen::prelude::*;
 use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
 use ark_crypto_primitives::snark::SNARK;
@@ -8,6 +7,8 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_ff::PrimeField;
 use std::sync::OnceLock;
+use js_sys::Object;
+use base64::Engine;
 
 // ============================================================================
 // TRUE PRIVACY WITH FULL GROTH16 ZKP
@@ -77,47 +78,47 @@ static VERIFYING_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 pub fn initialize_zkp() -> Result<JsValue, JsValue> {
     // Check if already initialized
     if PROVING_KEY.get().is_some() {
-        return Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
-            "initialized": true,
-            "message": "ZKP already initialized"
-        })).unwrap());
+        let result = Object::new();
+        js_sys::Reflect::set(&result, &"initialized".into(), &true.into())?;
+        js_sys::Reflect::set(&result, &"message".into(), &"ZKP already initialized".into())?;
+        return Ok(result.into());
     }
-    
+
     // In production, this would:
     // 1. Check IndexedDB for cached proving key
     // 2. If not found, download from CDN
     // 3. Store in IndexedDB
-    
+
     // For now, we'll generate it (in production, this is pre-generated)
     let circuit = NEAROwnershipCircuit {
         account_id: Some("dummy".to_string()),
         nonce: Some("dummy".to_string()),
         commitment: Some(Fr::from(0u64)),
     };
-    
+
     let mut rng = rand::thread_rng();
     let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| JsValue::from_str(&format!("Setup failed: {}", e)))?;
-    
+
     // Serialize keys
     let mut pk_bytes = Vec::new();
     pk.serialize_compressed(&mut pk_bytes)
         .map_err(|e| JsValue::from_str(&format!("PK serialization failed: {}", e)))?;
-    
+
     let mut vk_bytes = Vec::new();
     vk.serialize_compressed(&mut vk_bytes)
         .map_err(|e| JsValue::from_str(&format!("VK serialization failed: {}", e)))?;
-    
+
     // Store globally (in production, this would be IndexedDB)
     let _ = PROVING_KEY.set(pk_bytes.clone());
     let _ = VERIFYING_KEY.set(vk_bytes.clone());
-    
-    Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
-        "initialized": true,
-        "proving_key_size": pk_bytes.len(),
-        "verifying_key_size": vk_bytes.len(),
-        "message": "ZKP system initialized"
-    })).unwrap())
+
+    let result = Object::new();
+    js_sys::Reflect::set(&result, &"initialized".into(), &true.into())?;
+    js_sys::Reflect::set(&result, &"proving_key_size".into(), &(pk_bytes.len() as u32).into())?;
+    js_sys::Reflect::set(&result, &"verifying_key_size".into(), &(vk_bytes.len() as u32).into())?;
+    js_sys::Reflect::set(&result, &"message".into(), &"ZKP system initialized".into())?;
+    Ok(result.into())
 }
 
 /// Compute commitment from account_id
@@ -160,9 +161,13 @@ pub fn generate_ownership_proof_with_nsec(
     // Compute commitment = SHA256(account_id || nsec)
     let commitment_input = format!("{}{}", account_id, nsec_hex);
     let commitment_hash_inner = Sha256::digest(commitment_input.as_bytes());
-    
+
     // Compute commitment_hash = SHA256(commitment) for extra security
     let commitment_hash = Sha256::digest(&commitment_hash_inner);
+
+    // Compute nullifier = SHA256(nsec || nonce) - unique per proof
+    let nullifier_input = format!("{}{}", nsec_hex, nonce);
+    let nullifier = Sha256::digest(nullifier_input.as_bytes());
     
     // Convert to field element for ZKP
     let mut commitment_bytes = [0u8; 32];
@@ -185,14 +190,17 @@ pub fn generate_ownership_proof_with_nsec(
     let mut proof_bytes = Vec::new();
     proof.serialize_compressed(&mut proof_bytes)
         .map_err(|e| JsValue::from_str(&format!("Proof serialization failed: {}", e)))?;
-    
-    Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
-        "proof": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &proof_bytes),
-        "commitment_hash": hex::encode(&commitment_hash),
-        "commitment": hex::encode(&commitment_hash_inner),  // Inner hash (for ZKP)
-        "public_inputs": [hex::encode(&commitment_hash)],
-        "proof_size": proof_bytes.len(),
-    })).unwrap())
+
+    // Return result as JavaScript object
+    let result = Object::new();
+    let proof_b64 = base64::engine::general_purpose::STANDARD.encode(&proof_bytes);
+    js_sys::Reflect::set(&result, &"proof".into(), &proof_b64.into())?;
+    js_sys::Reflect::set(&result, &"commitment_hash".into(), &hex::encode(&commitment_hash).into())?;
+    js_sys::Reflect::set(&result, &"commitment".into(), &hex::encode(&commitment_hash_inner).into())?;
+    js_sys::Reflect::set(&result, &"nullifier".into(), &hex::encode(&nullifier).into())?;
+    js_sys::Reflect::set(&result, &"proof_size".into(), &(proof_bytes.len() as u32).into())?;
+
+    Ok(result.into())
 }
 
 /// Verify ownership proof
@@ -229,11 +237,13 @@ pub fn verify_ownership_proof(
     let public_inputs = vec![commitment];
     let valid = Groth16::<Bn254>::verify(&vk, &public_inputs, &proof)
         .map_err(|e| JsValue::from_str(&format!("Verification failed: {}", e)))?;
-    
-    Ok(serde_wasm_bindgen::to_value(&serde_json::json!({
-        "valid": valid,
-        "message": if valid { "Proof is valid - ownership verified!" } else { "Invalid proof" }
-    })).unwrap())
+
+    let result = Object::new();
+    js_sys::Reflect::set(&result, &"valid".into(), &valid.into())?;
+    let message = if valid { "Proof is valid - ownership verified!" } else { "Invalid proof" };
+    js_sys::Reflect::set(&result, &"message".into(), &message.into())?;
+
+    Ok(result.into())
 }
 
 /// Get current timestamp
