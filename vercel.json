@@ -1,5 +1,4 @@
 {
-  "installCommand": "pnpm install --no-frozen-lockfile",
-  "buildCommand": "pnpm build --filter=@nostr-identity/web",
-  "outputDirectory": "apps/web/.next"
+  "framework": null,
+  "rootDirectory": "apps/web"
 }
