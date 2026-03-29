@@ -1,0 +1,14 @@
+{
+  "name": "@nostr-identity/zkp-wasm",
+  "version": "0.2.0",
+  "private": true,
+  "main": "pkg/nostr_identity_zkp_wasm.js",
+  "types": "pkg/nostr_identity_zkp_wasm.d.ts",
+  "files": [
+    "pkg/*"
+  ],
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "dev": "wasm-pack build --target web --out-dir pkg --dev"
+  }
+}
