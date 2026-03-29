@@ -1,7 +1,5 @@
 {
   "projectId": "prj_tYwqLctm6ATKoMPgPsivrmOPdAvr",
   "orgId": "team_RBaWGlrrlBtpHPaJJcaWDomu",
-  "projectName": "nostr-near",
-  "framework": null,
-  "packageManager": "pnpm"
+  "projectName": "nostr-near"
 }
