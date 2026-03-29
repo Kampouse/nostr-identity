@@ -7,6 +7,10 @@ const OUTLAYER_API_BASE = 'https://api.outlayer.fastnear.com/call'
 const PROJECT_ID = process.env.OUTLAYER_PROJECT_ID || 'nostr-identity.near/tee-service'
 const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
 
+// Secrets configuration for TEE to sign transactions
+const SECRETS_PROFILE = process.env.OUTLAYER_SECRETS_PROFILE || 'default'
+const SECRETS_ACCOUNT_ID = process.env.OUTLAYER_SECRETS_ACCOUNT_ID || ''
+
 export async function registerIdentityWithZKP(params: {
   npub: string
   proof: string
@@ -27,7 +31,34 @@ export async function registerIdentityWithZKP(params: {
       projectId: PROJECT_ID,
       npub: npub.substring(0, 20) + '...',
       commitment: commitment.substring(0, 20) + '...',
+      usingSecrets: !!SECRETS_ACCOUNT_ID,
     })
+
+    // Build request body
+    const requestBody: any = {
+      input: {
+        action: 'register_with_zkp',
+        npub: npub,
+        zkp_proof: {
+          proof: proof,
+          public_inputs: [commitment, nullifier],
+          verified: true,
+          timestamp: Math.floor(Date.now() / 1000)
+        },
+        writer_contract_id: contractIdFinal,
+        deadline: Math.floor(Date.now() / 1000) + 3600 // 1 hour
+      },
+      async: false // Wait for result
+    }
+
+    // Add secrets reference if configured (for TEE to sign transactions)
+    if (SECRETS_ACCOUNT_ID) {
+      requestBody.secrets_ref = {
+        profile: SECRETS_PROFILE,
+        account_id: SECRETS_ACCOUNT_ID
+      }
+      console.log('🔐 Using secrets:', SECRETS_PROFILE, 'from', SECRETS_ACCOUNT_ID)
+    }
 
     // Call OutLayer HTTPS API
     const response = await fetch(`${OUTLAYER_API_BASE}/${PROJECT_ID}`, {
@@ -38,21 +69,7 @@ export async function registerIdentityWithZKP(params: {
         'X-Attached-Deposit': '50000', // $0.05 to author
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        input: {
-          action: 'register_with_zkp',
-          npub: npub,
-          zkp_proof: {
-            proof: proof,
-            public_inputs: [commitment, nullifier],
-            verified: true,
-            timestamp: Math.floor(Date.now() / 1000)
-          },
-          writer_contract_id: contractIdFinal,
-          deadline: Math.floor(Date.now() / 1000) + 3600 // 1 hour
-        },
-        async: false // Wait for result
-      })
+      body: JSON.stringify(requestBody)
     })
 
     if (!response.ok) {
