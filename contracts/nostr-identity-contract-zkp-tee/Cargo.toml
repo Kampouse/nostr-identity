@@ -5,8 +5,8 @@ edition = "2021"
 
 [features]
 default = []
-outlayer-tee = []  # Enable OutLayer TEE: persistent storage + NEAR contract calls + TEE signing
-local-test = ["minreq"]    # Local testing: uses file-backed storage + minreq for RPC
+outlayer-tee = []
+local-test = ["minreq"]
 
 [[bin]]
 name = "nostr-identity-zkp-tee"
@@ -25,10 +25,15 @@ path = "src/lib.rs"
 ed25519-dalek = "2.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
 
-# HTTP (for NEAR RPC calls - local-test mode only)
+# Borsh serialization
+borsh = { version = "1.5", features = ["derive"] }
+
+# HTTP client for WASI P2 (OutLayer TEE)
+wasi-http-client = "0.2"
+# HTTP for local testing
 minreq = { version = "2", features = ["https-rustls"], optional = true }
 
-# ZKP (Real zero-knowledge proofs)
+# ZKP
 ark-groth16 = "0.4"
 ark-bn254 = "0.4"
 ark-ff = "0.4"
