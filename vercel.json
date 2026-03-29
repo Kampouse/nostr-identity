@@ -1,4 +1,5 @@
 {
-  "installCommand": "pnpm install --no-frozen-lockfile",
-  "buildCommand": "pnpm build --filter=@nostr-identity/web"
+  "framework": "nextjs",
+  "installCommand": "echo 'Skipping install for prebuilt deployment'",
+  "buildCommand": "echo 'Skipping build - using prebuilt deployment'"
 }

@@ -1,1 +1,16 @@
-{"projectId":"prj_ZVKiBYu9rJsRmfB07Ev7AujaPYeD","orgId":"team_RBaWGlrrlBtpHPaJJcaWDomu","projectName":"nostr-identity"}
+{
+  "projectId": "prj_tYwqLctm6ATKoMPgPsivrmOPdAvr",
+  "orgId": "team_RBaWGlrrlBtpHPaJJcaWDomu",
+  "projectName": "nostr-near",
+  "settings": {
+    "createdAt": 1774815587975,
+    "framework": "nextjs",
+    "devCommand": null,
+    "installCommand": null,
+    "buildCommand": null,
+    "outputDirectory": null,
+    "rootDirectory": null,
+    "directoryListing": false,
+    "nodeVersion": "24.x"
+  }
+}
