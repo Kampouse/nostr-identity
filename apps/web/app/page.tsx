@@ -146,32 +146,45 @@ export default function Home() {
       console.log('   commitment:', proofResult.commitment)
       console.log('   nullifier:', proofResult.nullifier)
       console.log('   commitment_hash:', proofResult.commitment_hash)
+      console.log('   proof:', proofResult.proof?.substring(0, 50) + '...')
+
+      // Validate proof data
+      if (!proofResult.proof || !proofResult.commitment || !proofResult.nullifier) {
+        throw new Error('Invalid ZKP proof: missing required fields')
+      }
 
       // 4. Send ONLY public data to TEE — no nsec, no account_id
+      console.log('📡 Sending to TEE:', TEE_URL)
       const contractId = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
       const deadline = Math.floor(Date.now() / 1000) + 3600 // 1 hour
+
+      const requestBody = {
+        action: 'register_with_zkp',
+        npub: keypair.publicKeyHex,        // public key only
+        zkp_proof: {
+          proof: proofResult.proof,          // ZKP proof (doesn't reveal nsec)
+          public_inputs: [
+            proofResult.commitment,          // commitment hash
+            proofResult.nullifier            // nullifier hash
+          ],
+          verified: true,
+          timestamp: Math.floor(Date.now() / 1000)
+        },
+        writer_contract_id: contractId,
+        deadline: deadline
+      }
+
+      console.log('📦 Request body:', JSON.stringify(requestBody, null, 2))
 
       const response = await fetch(TEE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'register_with_zkp',
-          npub: keypair.publicKeyHex,        // public key only
-          zkp_proof: {
-            proof: proofResult.proof,          // ZKP proof (doesn't reveal nsec)
-            public_inputs: [
-              proofResult.commitment,          // commitment hash
-              proofResult.nullifier            // nullifier hash
-            ],
-            verified: true,
-            timestamp: Math.floor(Date.now() / 1000)
-          },
-          writer_contract_id: contractId,
-          deadline: deadline
-        })
+        body: JSON.stringify(requestBody)
       })
 
+      console.log('📡 TEE Response status:', response.status)
       const data: TeeResponse = await response.json()
+      console.log('📦 TEE Response data:', JSON.stringify(data, null, 2))
 
       if (!data.success) {
         throw new Error(data.error || 'Failed to register identity')
