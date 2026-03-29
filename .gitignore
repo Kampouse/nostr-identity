@@ -55,6 +55,4 @@ contracts/*/Cargo.lock
 *~
 packages/zkp-wasm/target/
 packages/zkp-wasm/Cargo.lock
-packages/zkp-wasm/pkg/
 target/
-*.wasm

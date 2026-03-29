@@ -1,0 +1,15 @@
+{
+  "name": "nostr-identity-zkp-wasm",
+  "type": "module",
+  "version": "0.2.0",
+  "files": [
+    "nostr_identity_zkp_wasm_bg.wasm",
+    "nostr_identity_zkp_wasm.js",
+    "nostr_identity_zkp_wasm.d.ts"
+  ],
+  "main": "nostr_identity_zkp_wasm.js",
+  "types": "nostr_identity_zkp_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
