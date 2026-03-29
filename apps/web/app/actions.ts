@@ -91,60 +91,13 @@ export async function registerIdentityWithZKP(params: {
       throw new Error('No output from TEE execution')
     }
 
-    const teeResponse: TeeResponse = result.output
-    console.log('✅ TEE execution success, checking for signed transaction...')
+    const data: TeeResponse = result.output
+    console.log('✅ TEE success - transaction submitted by TEE:', data.transaction_hash)
 
-    // Check if TEE returned a signed transaction
-    if (!teeResponse.signed_transaction) {
-      throw new Error('TEE did not return a signed transaction')
+    // TEE should have submitted the transaction and returned the hash
+    if (!data.transaction_hash) {
+      throw new Error('TEE did not return transaction hash - submission may have failed')
     }
-
-    console.log('📝 Signed transaction received from TEE')
-
-    // Submit the signed transaction to NEAR RPC
-    const network = process.env.NEXT_PUBLIC_NEAR_NETWORK || 'testnet'
-    const rpcUrl = network === 'mainnet'
-      ? 'https://rpc.mainnet.near.org'
-      : 'https://rpc.testnet.near.org'
-
-    console.log('📡 Submitting transaction to NEAR RPC:', rpcUrl)
-
-    // Build the RPC request for sending transaction
-    const signedTx = teeResponse.signed_transaction as any
-    const rpcResponse = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 'dontcare',
-        method: 'broadcast_tx_async',
-        params: [signedTx]
-      })
-    })
-
-    if (!rpcResponse.ok) {
-      const errorText = await rpcResponse.text()
-      console.error('❌ RPC submission failed:', rpcResponse.status, errorText)
-      throw new Error(`Failed to submit transaction to NEAR RPC: ${rpcResponse.status}`)
-    }
-
-    const rpcData = await rpcResponse.json()
-    console.log('✅ Transaction submitted to RPC:', rpcData)
-
-    // Extract transaction hash from RPC response
-    const transactionHash = rpcData.result || signedTx.hash
-
-    // Return response with actual transaction hash from RPC
-    const data: TeeResponse = {
-      success: true,
-      npub: teeResponse.npub,
-      commitment: teeResponse.commitment,
-      nullifier: teeResponse.nullifier,
-      transaction_hash: transactionHash,
-      created_at: teeResponse.created_at
-    }
-
-    console.log('✅ Complete success! Transaction hash:', transaction_hash)
 
     return data
   } catch (error: any) {

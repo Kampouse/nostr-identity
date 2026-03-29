@@ -1320,7 +1320,19 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 7. Return signed transaction to client (they will submit it)
+    // 6. Submit the signed transaction to NEAR RPC from within TEE
+    let tx_hash = match submit_transaction_to_near_rpc(&signed_tx) {
+        Ok(hash) => hash,
+        Err(e) => {
+            return ActionResult {
+                success: false,
+                error: Some(format!("Failed to submit transaction to RPC: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // 7. Return success with actual transaction hash from RPC
     ActionResult {
         success: true,
         npub: Some(npub),
@@ -1329,8 +1341,8 @@ fn handle_register_with_zkp(
         nullifier: Some(nullifier),
         created_at: Some(created_at),
         attestation: Some(generate_attestation()),
-        signed_transaction: Some(signed_tx),
-        tx_payload: None, // Not needed anymore
+        transaction_hash: Some(tx_hash),
+        signed_transaction: Some(signed_tx),  // Also include for reference
         ..Default::default()
     }
 }
@@ -1441,6 +1453,52 @@ fn sign_transaction_with_near_key(
         "public_key": format!("ed25519:{}", bs58::encode(secret_key.verifying_key().as_bytes()).into_string()),
         "hash": hex::encode(tx_hash),
     }))
+}
+
+// Submit signed transaction to NEAR RPC
+fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<String, String> {
+    use std::env;
+
+    // Get RPC URL from environment
+    let rpc_url = env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
+
+    // Build RPC request
+    let rpc_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dontcare",
+        "method": "broadcast_tx_commit",
+        "params": [signed_tx]
+    });
+
+    let request_body = serde_json::to_string(&rpc_request)
+        .map_err(|e| format!("Failed to serialize RPC request: {}", e))?;
+
+    // Submit to RPC
+    let response_body = fetch_rpc(&rpc_url, &request_body)
+        .ok_or("Failed to connect to NEAR RPC")?;
+
+    // Parse response
+    let response: serde_json::Value = serde_json::from_str(&response_body)
+        .map_err(|e| format!("Failed to parse RPC response: {}", e))?;
+
+    // Check for RPC error
+    if let Some(error) = response.get("error") {
+        return Err(format!("RPC error: {}", error));
+    }
+
+    // Extract transaction hash
+    let tx_hash = response.get("result")
+        .and_then(|r| r.get("transaction"))
+        .and_then(|tx| tx.get("hash"))
+        .and_then(|h| h.as_str())
+        .or_else(|| {
+            signed_tx.get("hash")
+                .and_then(|h| h.as_str())
+        })
+        .ok_or("No transaction hash in response")?;
+
+    Ok(tx_hash.to_string())
 }
 
 // Call smart contract via OutLayer
