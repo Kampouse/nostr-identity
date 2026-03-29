@@ -7,6 +7,10 @@
     "services/*",
     "packages/*"
   ],
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
   "scripts": {
     "postinstall": "pnpm build:packages",
     "dev": "pnpm --filter @nostr-identity/web dev",
@@ -17,7 +21,8 @@
     "build:all": "pnpm build:contract && pnpm build",
     "start": "pnpm --filter @nostr-identity/web start",
     "lint": "pnpm --filter @nostr-identity/web lint",
-    "clean": "./scripts/clean.sh"
+    "clean": "./scripts/clean.sh",
+    "vercel-build": "pnpm build"
   },
   "devDependencies": {
     "@types/node": "^20",
