@@ -1,4 +1,4 @@
 {
-  "framework": null,
-  "rootDirectory": "apps/web"
+  "installCommand": "pnpm install --no-frozen-lockfile",
+  "buildCommand": "pnpm build --filter=@nostr-identity/web"
 }
