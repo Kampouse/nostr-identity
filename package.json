@@ -14,14 +14,14 @@
   },
   "scripts": {
     "postinstall": "pnpm build:packages",
-    "dev": "pnpm --filter @nostr-identity/web dev",
+    "dev": "next dev",
     "build:wasm": "cd packages/zkp-wasm && wasm-pack build --target web --out-dir pkg",
     "build:packages": "pnpm --filter @nostr-identity/crypto build && pnpm --filter @nostr-identity/types build && pnpm --filter @nostr-identity/nostr build",
-    "build": "pnpm build:packages && pnpm --filter @nostr-identity/web build",
+    "build": "pnpm build:packages && next build",
     "build:contract": "cd contracts/nostr-identity-contract-zkp-tee && cargo build --target wasm32-wasip2 --release",
     "build:all": "pnpm build:contract && pnpm build",
-    "start": "pnpm --filter @nostr-identity/web start",
-    "lint": "pnpm --filter @nostr-identity/web lint",
+    "start": "next start",
+    "lint": "next lint",
     "clean": "./scripts/clean.sh",
     "vercel-build": "pnpm build"
   },
