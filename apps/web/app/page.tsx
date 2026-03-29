@@ -77,12 +77,20 @@ export default function Home() {
 
   // Generate identity with client-side keys + ZKP
   const generateIdentity = async () => {
-    if (!accountId || !connector) return
+    console.log('🚀 generateIdentity called!')
+    console.log('accountId:', accountId)
+    console.log('connector:', connector)
+
+    if (!accountId || !connector) {
+      console.error('Missing accountId or connector')
+      return
+    }
 
     setLoading(true)
     setError('')
 
     try {
+      console.log('⏳ Initializing ZKP...')
       // 0. Initialize ZKP (downloads proving key once, cached in IndexedDB)
       const zkp = await initZKP()
       console.log('✅ ZKP initialized')
@@ -91,15 +99,22 @@ export default function Home() {
       const keypair = generateNostrKeypair()
       console.log('✅ Nostr keypair generated locally')
       console.log('   npub:', keypair.publicKeyHex)
+      console.log('   nsec length:', keypair.privateKeyHex.length)
+      console.log('   nsec:', keypair.privateKeyHex)
 
       // 2. Get NEP-413 signature from wallet (proves NEAR account ownership)
-      const wallet = await connector.wallet()
+      console.log('📝 Signing message with wallet...')
       const message = `Generate Nostr identity for ${accountId}`
-      const nonce = crypto.randomUUID()
 
+      // Generate 32-byte nonce for NEP-413 (wallet requirement)
+      const nonceBytes = new Uint8Array(32)
+      crypto.getRandomValues(nonceBytes)
+
+      // Get wallet instance and sign message
+      const wallet = await connector.wallet()
       const authResponse = await wallet.signMessage({
         message,
-        nonce: new TextEncoder().encode(nonce),
+        nonce: nonceBytes,  // Pass Uint8Array directly (32 bytes)
         recipient: "nostr-identity.near"
       })
 
@@ -112,13 +127,25 @@ export default function Home() {
       //    commitment = SHA256(SHA256(account_id + nsec)) — nsec-bound, untraceable
       //    nullifier = SHA256(nsec + nonce)
       const zkpNonce = zkp.generate_nonce()
+      console.log('   nonce length:', zkpNonce.length)
+      console.log('   nonce:', zkpNonce)
+
+      console.log('Calling generate_ownership_proof_with_nsec with:')
+      console.log('  account_id:', accountId, `(${accountId.length} chars)`)
+      console.log('  nsec (privateKeyHex):', keypair.privateKeyHex, `(${keypair.privateKeyHex.length} chars)`)
+      console.log('  nonce:', zkpNonce, `(${zkpNonce.length} chars)`)
+
       const proofResult = zkp.generate_ownership_proof_with_nsec(
         accountId,
         keypair.privateKeyHex,  // nsec — stays client-side!
         zkpNonce
       )
       console.log('✅ ZKP proof generated (client-side)')
+      console.log('📦 Full proofResult object:', JSON.stringify(proofResult, null, 2))
+      console.log('📦 proofResult keys:', Object.keys(proofResult))
       console.log('   commitment:', proofResult.commitment)
+      console.log('   nullifier:', proofResult.nullifier)
+      console.log('   commitment_hash:', proofResult.commitment_hash)
 
       // 4. Send ONLY public data to TEE — no nsec, no account_id
       const contractId = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
