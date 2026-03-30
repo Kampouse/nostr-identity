@@ -1,5 +1,3 @@
 {
-  "framework": "nextjs",
-  "installCommand": "echo 'Skipping install for prebuilt deployment'",
-  "buildCommand": "echo 'Skipping build - using prebuilt deployment'"
+  "framework": "nextjs"
 }

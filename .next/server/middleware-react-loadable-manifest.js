@@ -1,1 +1,0 @@
-self.__REACT_LOADABLE_MANIFEST='{"app/page.tsx -> @nostr-identity/zkp-wasm":{"id":3472,"files":["static/chunks/472.d6673cca47a7c55e.js"]}}';
