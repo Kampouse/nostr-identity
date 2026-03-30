@@ -2,7 +2,139 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #111118;
+  --bg-tertiary: #1a1a24;
+  --bg-elevated: #22222e;
+  --border-primary: #2a2a3a;
+  --border-subtle: #1e1e2e;
+  --text-primary: #e8e8ed;
+  --text-secondary: #9898a6;
+  --text-muted: #6b6b7b;
+  --accent-near: #00c08b;
+  --accent-near-dim: #00c08b22;
+  --accent-near-hover: #00dba0;
+  --accent-nostr: #6d28d9;
+  --accent-nostr-dim: #6d28d922;
+  --accent-warning: #f59e0b;
+  --accent-danger: #ef4444;
+  --accent-success: #22c55e;
+}
+
+* {
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
 body {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  min-height: 100vh;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Monospace for keys */
+.font-mono {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Display font for hero headings */
+.font-display {
+  font-family: var(--font-display), 'Inter', sans-serif;
+}
+
+/* Subtle glow effects */
+.glow-near {
+  box-shadow: 0 0 20px var(--accent-near-dim), 0 0 60px var(--accent-near-dim);
+}
+
+.glow-nostr {
+  box-shadow: 0 0 20px var(--accent-nostr-dim), 0 0 60px var(--accent-nostr-dim);
+}
+
+/* Card hover effect */
+.card-interactive {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card-interactive:hover {
+  border-color: var(--border-primary);
+}
+
+/* Step connector line */
+.step-connector {
+  position: relative;
+}
+
+.step-connector::after {
+  content: '';
+  position: absolute;
+  left: 15px;
+  top: 40px;
+  bottom: -16px;
+  width: 1px;
+  background: var(--border-subtle);
+}
+
+.step-connector:last-child::after {
+  display: none;
+}
+
+/* Pulse animation for loading */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Fade in animation */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.4s ease-out forwards;
+}
+
+/* Copy feedback animation */
+@keyframes check-pop {
+  0% { transform: scale(0.8); opacity: 0; }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-check {
+  animation: check-pop 0.2s ease-out forwards;
+}
+
+/* Hero glow behind text */
+.hero-glow {
+  position: relative;
+}
+
+.hero-glow::before {
+  content: '';
+  position: absolute;
+  top: -20%;
+  left: -10%;
+  width: 50%;
+  height: 60%;
+  background: radial-gradient(ellipse, var(--accent-near-dim) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(40px);
+}
+
+.hero-glow > * {
+  position: relative;
+  z-index: 1;
 }
