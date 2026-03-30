@@ -451,3 +451,5 @@ mod tests {
         assert!(!valid, "Wrong commitment should fail verification");
     }
 }
+
+#[cfg(test)]
