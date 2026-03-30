@@ -11,6 +11,9 @@ const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
 const SECRETS_PROFILE = process.env.OUTLAYER_SECRETS_PROFILE || 'default'
 const SECRETS_ACCOUNT_ID = process.env.OUTLAYER_SECRETS_ACCOUNT_ID || ''
 
+// Contract configuration
+const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.kampouse.testnet'
+
 export async function registerIdentityWithZKP(params: {
   npub: string
   proof: string
@@ -25,16 +28,18 @@ export async function registerIdentityWithZKP(params: {
       throw new Error('OUTLAYER_PAYMENT_KEY environment variable is not set')
     }
 
-    const contractIdFinal = contractId || process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.testnet'
+    const contractIdFinal = contractId || CONTRACT_ID
 
     console.log('📡 Server action: Calling OutLayer API', {
       projectId: PROJECT_ID,
       npub: npub.substring(0, 20) + '...',
       commitment: commitment.substring(0, 20) + '...',
+      contractId: contractIdFinal,
       usingSecrets: !!SECRETS_ACCOUNT_ID,
     })
 
-    // Build request body
+    // Build request body — TEE will verify ZKP, compute account_hash,
+    // then call contract.register(npub, commitment, nullifier, account_hash)
     const requestBody: any = {
       input: {
         action: 'register_with_zkp',

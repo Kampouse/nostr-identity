@@ -619,23 +619,34 @@ pub enum Action {
         deadline: u64,
     },
     
-    /// TRUE PRIVACY: Register with client-generated ZKP
-    /// TEE NEVER sees account_id - only verifies the ZKP
+    /// Register with client-generated ZKP + NEP-413 auth.
+    ///
+    /// Flow:
+    ///   1. Client generates npub/nsec locally
+    ///   2. Client computes commitment = SHA256("commitment:" || account_id || nsec)
+    ///   3. Client generates ZKP proving knowledge of account_id + nsec
+    ///   4. Client signs NEP-413 to prove NEAR account ownership
+    ///   5. Client sends everything to TEE
+    ///   6. TEE verifies NEP-413 (proves account_id) + ZKP, computes account_hash
+    ///   7. TEE calls contract.register(npub, commitment, nullifier, account_hash)
     #[serde(rename = "register_with_zkp")]
     RegisterWithZkp {
         /// Client-generated ZKP containing commitment and nullifier
         zkp_proof: ZKPProof,
         /// Client-generated Nostr public key
         npub: String,
-        /// Writer contract to call
+        /// NEAR account ID (verified via NEP-413)
+        account_id: String,
+        /// NEP-413 auth response proving account ownership
+        nep413_response: Nep413AuthResponse,
+        /// Contract to call
         writer_contract_id: String,
         /// Transaction deadline
         deadline: u64,
         /// Optional signing key (TESTING ONLY - INSECURE)
         #[serde(skip_serializing_if = "Option::is_none")]
         signing_key: Option<String>,
-    },
-}
+    },}
 
 pub fn handle_action(action: Action) -> ActionResult {
     match action {
@@ -689,6 +700,8 @@ pub fn handle_action(action: Action) -> ActionResult {
         Action::RegisterWithZkp {
             zkp_proof,
             npub,
+            account_id,
+            nep413_response,
             writer_contract_id,
             deadline,
             signing_key,
@@ -696,6 +709,8 @@ pub fn handle_action(action: Action) -> ActionResult {
             handle_register_with_zkp(
                 zkp_proof,
                 npub,
+                account_id,
+                nep413_response,
                 writer_contract_id,
                 deadline,
                 signing_key,
@@ -1228,26 +1243,35 @@ fn handle_prepare_writer_call(
     }
 }
 
-/// Register with client-generated ZKP.
+/// Register with client-generated ZKP + NEP-413 auth.
 ///
 /// Flow:
 ///   1. Client generates npub/nsec locally
 ///   2. Client computes commitment = SHA256("commitment:" || account_id || nsec)
 ///   3. Client generates ZKP proving knowledge of account_id + nsec
-///   4. Client sends {npub, commitment, nullifier, zkp_proof} to TEE
-///   5. TEE verifies ZKP, computes account_hash, calls contract
-///   6. Contract stores {npub, commitment, nullifier, account_hash}
-///
-/// Privacy: TEE sees account_id during verification but never stores it.
-///          On-chain data is fully opaque (all hashes).
+///   4. Client signs NEP-413 to prove NEAR account ownership
+///   5. Client sends everything to TEE
+///   6. TEE verifies NEP-413 (proves account_id) + ZKP, computes account_hash
+///   7. TEE calls contract.register(npub, commitment, nullifier, account_hash)
 fn handle_register_with_zkp(
     zkp_proof: ZKPProof,
     npub: String,
+    account_id: String,
+    nep413_response: Nep413AuthResponse,
     writer_contract_id: String,
     deadline: u64,
     signing_key: Option<String>,
 ) -> ActionResult {
-    // 1. Extract commitment and nullifier from ZKP public inputs
+    // 1. Verify NEP-413 — proves the user owns this NEAR account
+    if let Err(e) = verify_nep413_ownership(&account_id, &nep413_response) {
+        return ActionResult {
+            success: false,
+            error: Some(format!("NEP-413 verification failed: {}", e)),
+            ..Default::default()
+        };
+    }
+
+    // 2. Extract commitment and nullifier from ZKP public inputs
     if zkp_proof.public_inputs.len() < 2 {
         return ActionResult {
             success: false,
@@ -1259,7 +1283,7 @@ fn handle_register_with_zkp(
     let commitment = zkp_proof.public_inputs[0].clone();
     let nullifier = zkp_proof.public_inputs[1].clone();
 
-    // 2. Verify ZKP
+    // 3. Verify ZKP
     if !zkp_proof.verified && zkp_proof.proof.is_empty() {
         return ActionResult {
             success: false,
@@ -1268,7 +1292,7 @@ fn handle_register_with_zkp(
         };
     }
 
-    // 3. Check if already registered
+    // 4. Check if already registered
     if is_commitment_used(&commitment) {
         return ActionResult {
             success: false,
@@ -1277,7 +1301,11 @@ fn handle_register_with_zkp(
         };
     }
 
-    // 4. Store identity locally
+    // 5. Compute account_hash = SHA256("account:" || account_id)
+    let account_hash_input = format!("account:{}", account_id);
+    let account_hash = hex::encode(compute_sha256(&account_hash_input));
+
+    // 6. Store identity locally
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1285,22 +1313,12 @@ fn handle_register_with_zkp(
 
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 5. Build contract call: register(npub, commitment, nullifier, account_hash)
-    //    account_hash is NOT derived here — the client provides commitment
-    //    which already binds account_id + nsec.
-    //    For double-reg prevention, TEE needs to extract account_id from
-    //    the ZKP context or receive it separately.
-    //    Current design: TEE trusts client commitment + ZKP proof.
-    //    account_hash = SHA256("account:" || account_id) would need NEP-413 flow.
-
-    // Build function call args for the nostr-identity contract
+    // 7. Build contract call: register(npub, commitment, nullifier, account_hash)
     let register_args = serde_json::json!({
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
-        "account_hash": commitment, // Placeholder: use commitment as account_hash
-                                    // In full flow, TEE computes SHA256("account:" || account_id)
-                                    // from NEP-413 verified account_id
+        "account_hash": account_hash,
     });
 
     let args_b64 = base64::Engine::encode(
@@ -1308,7 +1326,7 @@ fn handle_register_with_zkp(
         register_args.to_string(),
     );
 
-    // 6. Sign the transaction using NEAR private key from OutLayer secrets
+    // 8. Sign the transaction using NEAR private key from OutLayer secrets
     let tx_nonce = created_at * 1000;
 
     let actions = vec![
@@ -1339,7 +1357,7 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 7. Submit the signed transaction to NEAR RPC
+    // 9. Submit the signed transaction to NEAR RPC
     let tx_hash = match submit_transaction_to_near_rpc(&signed_tx) {
         Ok(hash) => hash,
         Err(e) => {
@@ -1351,7 +1369,7 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 8. Return success
+    // 10. Return success
     ActionResult {
         success: true,
         npub: Some(npub),
