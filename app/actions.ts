@@ -2,27 +2,33 @@
 
 import { TeeResponse } from '@nostr-identity/types'
 
-// OutLayer HTTPS API configuration
 const OUTLAYER_API_BASE = 'https://api.outlayer.fastnear.com/call'
-const PROJECT_ID = process.env.OUTLAYER_PROJECT_ID || 'nostr-identity.near/tee-service'
+const PROJECT_ID = process.env.OUTLAYER_PROJECT_ID || 'kampouse.near/nostr-identity-tee'
 const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
-
-// Secrets configuration for TEE to sign transactions
-const SECRETS_PROFILE = process.env.OUTLAYER_SECRETS_PROFILE || 'default'
-const SECRETS_ACCOUNT_ID = process.env.OUTLAYER_SECRETS_ACCOUNT_ID || ''
-
-// Contract configuration
 const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.kampouse.testnet'
+
+interface Nep413Response {
+  accountId: string
+  publicKey: string
+  signature: string
+  authRequest: {
+    message: string
+    nonce: string
+    recipient: string
+  }
+}
 
 export async function registerIdentityWithZKP(params: {
   npub: string
   proof: string
-  commitment: string
-  nullifier: string
+  commitmentField: string
+  nullifierField: string
+  accountId: string
+  nep413Response: Nep413Response
   contractId?: string
 }): Promise<TeeResponse> {
   try {
-    const { npub, proof, commitment, nullifier, contractId } = params
+    const { npub, proof, commitmentField, nullifierField, accountId, nep413Response, contractId } = params
 
     if (!PAYMENT_KEY) {
       throw new Error('OUTLAYER_PAYMENT_KEY environment variable is not set')
@@ -30,83 +36,67 @@ export async function registerIdentityWithZKP(params: {
 
     const contractIdFinal = contractId || CONTRACT_ID
 
-    console.log('📡 Server action: Calling OutLayer API', {
-      projectId: PROJECT_ID,
-      npub: npub.substring(0, 20) + '...',
-      commitment: commitment.substring(0, 20) + '...',
-      contractId: contractIdFinal,
-      usingSecrets: !!SECRETS_ACCOUNT_ID,
-    })
-
-    // Build request body — TEE will verify ZKP, compute account_hash,
-    // then call contract.register(npub, commitment, nullifier, account_hash)
-    const requestBody: any = {
+    // Send to TEE: proof, field elements (algebraic commitment), NEP-413 auth
+    // TEE verifies NEP-413 (proves account ownership) + ZKP (proves knowledge of nsec)
+    // TEE NEVER sees nsec
+    const requestBody = {
       input: {
         action: 'register_with_zkp',
-        npub: npub,
+        npub,
         zkp_proof: {
-          proof: proof,
-          public_inputs: [commitment, nullifier],
-          verified: true,
-          timestamp: Math.floor(Date.now() / 1000)
+          proof,
+          // Public inputs = algebraic field elements (what the circuit constrains)
+          public_inputs: [commitmentField, nullifierField],
+          verified: false, // TEE ignores this, verifies cryptographically
+          timestamp: Math.floor(Date.now() / 1000),
+        },
+        account_id: accountId,
+        nep413_response: {
+          account_id: nep413Response.accountId,
+          public_key: nep413Response.publicKey,
+          signature: nep413Response.signature,
+          authRequest: {
+            message: nep413Response.authRequest.message,
+            nonce: nep413Response.authRequest.nonce,
+            recipient: nep413Response.authRequest.recipient,
+          },
         },
         writer_contract_id: contractIdFinal,
-        deadline: Math.floor(Date.now() / 1000) + 3600 // 1 hour
+        deadline: Math.floor(Date.now() / 1000) + 3600,
       },
-      async: false // Wait for result
+      async: false,
     }
 
-    // Add secrets reference if configured (for TEE to sign transactions)
-    if (SECRETS_ACCOUNT_ID) {
-      requestBody.secrets_ref = {
-        profile: SECRETS_PROFILE,
-        account_id: SECRETS_ACCOUNT_ID
-      }
-      console.log('🔐 Using secrets:', SECRETS_PROFILE, 'from', SECRETS_ACCOUNT_ID)
-    }
-
-    // Call OutLayer HTTPS API
     const response = await fetch(`${OUTLAYER_API_BASE}/${PROJECT_ID}`, {
       method: 'POST',
       headers: {
-        'X-Payment-Key': PAYMENT_KEY,
-        'X-Compute-Limit': '100000', // $0.10 max
-        'X-Attached-Deposit': '50000', // $0.05 to author
         'Content-Type': 'application/json',
+        'X-Payment-Key': PAYMENT_KEY,
+        'X-Compute-Limit': '200000',
       },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
     })
 
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('❌ OutLayer API error:', response.status, errorText)
       throw new Error(`OutLayer API returned ${response.status}: ${errorText}`)
     }
 
     const result = await response.json()
-    console.log('📦 OutLayer response:', JSON.stringify(result, null, 2))
 
-    // Check if execution failed
     if (result.status === 'failed') {
       throw new Error(`TEE execution failed: ${result.error}`)
     }
 
-    // Extract the actual output from the OutLayer response
-    if (!result.output) {
-      throw new Error('No output from TEE execution')
+    const output = typeof result.output === 'string' ? JSON.parse(result.output) : result.output
+
+    if (!output.success) {
+      throw new Error(output.error || 'TEE registration failed')
     }
 
-    const data: TeeResponse = result.output
-    console.log('✅ TEE success - transaction submitted by TEE:', data.transaction_hash)
-
-    // TEE should have submitted the transaction and returned the hash
-    if (!data.transaction_hash) {
-      throw new Error('TEE did not return transaction hash - submission may have failed')
-    }
-
-    return data
+    return output as TeeResponse
   } catch (error: any) {
-    console.error('❌ Server action error:', error)
+    console.error('Registration error:', error)
     throw new Error(error.message || 'Failed to register identity')
   }
 }

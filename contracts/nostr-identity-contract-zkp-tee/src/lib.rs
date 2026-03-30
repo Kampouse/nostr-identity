@@ -4,6 +4,8 @@ use ark_ff::{PrimeField, One};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, LinearCombination, Variable};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+
+/// Fixed base point for algebraic commitment (must match client circuit)
 use ed25519_dalek::{Signature, VerifyingKey as Ed25519VerifyingKey};
 use k256::ecdsa::SigningKey;
 use rand::RngCore;
@@ -53,7 +55,6 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
 
         let base = Fr::from(COMMITMENT_BASE);
 
-        // CONSTRAINT 1: nsec_times_base = nsec * BASE
         let nsec_times_base = cs.new_witness_variable(|| {
             Ok(self.nsec.unwrap_or_default() * base)
         })?;
@@ -63,7 +64,6 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
             LinearCombination::zero() + nsec_times_base,
         )?;
 
-        // CONSTRAINT 2: commitment_computed = account_id + nsec_times_base
         let commitment_computed = cs.new_witness_variable(|| {
             Ok(self.account_id.unwrap_or_default() + self.nsec.unwrap_or_default() * base)
         })?;
@@ -73,14 +73,12 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
             LinearCombination::zero() + (Fr::one(), account_id_var) + (Fr::one(), nsec_times_base),
         )?;
 
-        // CONSTRAINT 3: commitment_computed == commitment_var
         cs.enforce_constraint(
             LinearCombination::zero() + (Fr::one(), commitment_computed) - (Fr::one(), commitment_var),
             LinearCombination::zero() + (Fr::one(), Variable::One),
             LinearCombination::zero(),
         )?;
 
-        // CONSTRAINT 4: nonce_times_base = nonce * BASE
         let nonce_times_base = cs.new_witness_variable(|| {
             Ok(self.nonce.unwrap_or_default() * base)
         })?;
@@ -90,7 +88,6 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
             LinearCombination::zero() + nonce_times_base,
         )?;
 
-        // CONSTRAINT 5: nullifier_computed = nsec + nonce_times_base
         let nullifier_computed = cs.new_witness_variable(|| {
             Ok(self.nsec.unwrap_or_default() + self.nonce.unwrap_or_default() * base)
         })?;
@@ -100,7 +97,6 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
             LinearCombination::zero() + (Fr::one(), nsec_var) + (Fr::one(), nonce_times_base),
         )?;
 
-        // CONSTRAINT 6: nullifier_computed == nullifier_var
         cs.enforce_constraint(
             LinearCombination::zero() + (Fr::one(), nullifier_computed) - (Fr::one(), nullifier_var),
             LinearCombination::zero() + (Fr::one(), Variable::One),

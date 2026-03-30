@@ -8,7 +8,7 @@ use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_ff::{PrimeField, One};
 use std::sync::OnceLock;
 use js_sys::Object;
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 // ============================================================================
 // TRUE PRIVACY WITH FULL GROTH16 ZKP
@@ -371,6 +371,16 @@ pub fn get_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Export the verifying key as base64 (for embedding in TEE)
+/// The TEE uses this same VK to verify client proofs
+#[wasm_bindgen]
+pub fn export_verifying_key() -> Result<String, JsValue> {
+    let vk_bytes = VERIFYING_KEY.get()
+        .ok_or_else(|| JsValue::from_str("ZKP not initialized"))?;
+    
+    Ok(base64::engine::general_purpose::STANDARD.encode(vk_bytes))
 }
 
 #[cfg(test)]

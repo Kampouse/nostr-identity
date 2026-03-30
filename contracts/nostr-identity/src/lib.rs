@@ -9,9 +9,9 @@
 //!   verify ownership proofs without revealing the underlying data.
 //!
 //! On-chain data is opaque:
-//!   - commitment  = SHA256("commitment:" || account_id || nsec)  (client-side)
-//!   - nullifier   = SHA256("nullifier:" || nsec || nonce)        (client-side)
-//!   - npub        = Nostr public key                             (public)
+//!   - commitment  = field_element(account_id + nsec * COMMITMENT_BASE)  (client-side ZKP)
+//!   - nullifier   = field_element(nsec + nonce * COMMITMENT_BASE)        (client-side ZKP)
+//!   - npub        = Nostr public key                                     (public)
 //!
 //! Nobody can reverse the commitment or nullifier to find account_id or nsec.
 
@@ -29,9 +29,9 @@ use near_sdk::{env, near_bindgen, AccountId, BorshStorageKey, PanicOnDefault};
 pub struct IdentityInfo {
     /// Nostr public key (hex secp256k1 x-only, 64 chars)
     pub npub: String,
-    /// SHA256("commitment:" || account_id || nsec) — 64 hex chars
+    /// Algebraic commitment = field_element(account_id + nsec * BASE) — 64 hex chars
     pub commitment: String,
-    /// SHA256("nullifier:" || nsec || nonce) — 64 hex chars
+    /// Algebraic nullifier = field_element(nsec + nonce * BASE) — 64 hex chars
     pub nullifier: String,
     /// SHA256("account:" || account_id) — used for double-reg prevention
     pub account_hash: String,
@@ -100,8 +100,8 @@ impl NostrIdentityContract {
     ///   4. Computed account_hash = SHA256("account:" || account_id)
     ///
     /// # Commitment scheme (all hex-encoded SHA256, 64 chars)
-    ///   commitment   = SHA256("commitment:" || account_id || nsec)   — client-side
-    ///   nullifier    = SHA256("nullifier:" || nsec || nonce)         — client-side
+    ///   commitment   = field_element(account_id + nsec * COMMITMENT_BASE)  — client-side ZKP
+    ///   nullifier    = field_element(nsec + nonce * COMMITMENT_BASE)       — client-side ZKP
     ///   account_hash = SHA256("account:" || account_id)              — TEE-side
     pub fn register(
         &mut self,

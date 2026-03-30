@@ -170,15 +170,26 @@ export default function Home() {
         zkpNonce
       )
 
-      if (!proofResult.proof || !proofResult.commitment || !proofResult.nullifier) {
+      if (!proofResult.proof || !proofResult.commitment_field || !proofResult.nullifier_field) {
         throw new Error('Invalid ZKP proof: missing required fields')
       }
 
       const data = await registerIdentityWithZKP({
         npub: keypair.publicKeyHex,
         proof: proofResult.proof,
-        commitment: proofResult.commitment,
-        nullifier: proofResult.nullifier,
+        commitmentField: proofResult.commitment_field,
+        nullifierField: proofResult.nullifier_field,
+        accountId: accountId,
+        nep413Response: {
+          accountId: accountId,
+          publicKey: authResponse.publicKey,
+          signature: authResponse.signature,
+          authRequest: {
+            message,
+            nonce: Buffer.from(nonceBytes).toString('base64'),
+            recipient: 'nostr-identity.near',
+          }
+        }
       })
 
       if (!data.success) {
