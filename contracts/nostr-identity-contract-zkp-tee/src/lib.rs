@@ -259,6 +259,8 @@ lazy_static::lazy_static! {
         std::sync::Mutex::new(None);
     static ref VERIFYING_KEY: std::sync::Mutex<Option<VerifyingKey<Bn254>>> = 
         std::sync::Mutex::new(None);
+    static ref USED_NONCES: std::sync::Mutex<HashMap<String, bool>> = 
+        std::sync::Mutex::new(HashMap::new());
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -285,7 +287,16 @@ fn verify_nep413_ownership(
         return Err("Invalid recipient".to_string());
     }
 
-    // Step 1: Verify the public key actually belongs to this account on NEAR
+    // Replay protection: check nonce hasn't been used
+    let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
+    {
+        let used = USED_NONCES.lock().unwrap();
+        if used.contains_key(&nonce_key) {
+            return Err("Nonce already used — replay attack detected".to_string());
+        }
+    }
+
+    // Verify the public key actually belongs to this account on NEAR
     verify_account_key_ownership(account_id, &nep413_response.public_key)?;
 
     // Step 2: Parse and verify signature
@@ -320,6 +331,10 @@ fn verify_nep413_ownership(
     public_key
         .verify_strict(&message_hash, &signature)
         .map_err(|e| format!("Invalid signature: {}", e))?;
+
+    // Mark nonce as used to prevent replay
+    let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
+    USED_NONCES.lock().unwrap().insert(nonce_key, true);
 
     Ok(())
 }
@@ -1034,6 +1049,73 @@ fn handle_check_commitment(commitment: String) -> ActionResult {
     }
 }
 
+/// Verify a Groth16 proof against the stored verifying key.
+/// Returns true if the proof is cryptographically valid.
+fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
+    // 1. Decode base64 proof
+    let proof_bytes = match STANDARD.decode(proof_b64) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    // 2. Deserialize proof
+    let proof: ark_groth16::Proof<Bn254> = match CanonicalDeserialize::deserialize_compressed(&proof_bytes[..]) {
+        Ok(p) => p,
+        Err(_) => {
+            // Try uncompressed
+            match CanonicalDeserialize::deserialize_uncompressed(&proof_bytes[..]) {
+                Ok(p) => p,
+                Err(_) => return false,
+            }
+        }
+    };
+
+    // 3. Get or initialize verifying key
+    let vk = {
+        let vk_lock = VERIFYING_KEY.lock().unwrap();
+        if let Some(ref vk) = *vk_lock {
+            vk.clone()
+        } else {
+            // Auto-initialize with a dummy circuit setup
+            // In production, the VK should be embedded or fetched from a trusted source
+            drop(vk_lock);
+            let circuit = NEAROwnershipCircuit {
+                account_id: Some("__init__".to_string()),
+                nonce: Some("__init__".to_string()),
+            };
+            let mut rng = rand::thread_rng();
+            let (_, vk) = match Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng) {
+                Ok(keys) => keys,
+                Err(_) => return false,
+            };
+            let mut vk_lock = VERIFYING_KEY.lock().unwrap();
+            *vk_lock = Some(vk.clone());
+            vk
+        }
+    };
+
+    // 4. Parse public inputs into field elements
+    let mut inputs = Vec::new();
+    for hex_input in public_inputs {
+        let bytes = match hex::decode(hex_input) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        if bytes.len() != 32 {
+            return false;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[..32]);
+        inputs.push(Fr::from_le_bytes_mod_order(&arr));
+    }
+
+    // 5. Verify the proof
+    match Groth16::<Bn254>::verify(&vk, &inputs, &proof) {
+        Ok(valid) => valid,
+        Err(_) => false,
+    }
+}
+
 fn handle_stats() -> ActionResult {
     let identities = IDENTITIES.lock().unwrap();
     let count = identities.len();
@@ -1283,11 +1365,26 @@ fn handle_register_with_zkp(
     let commitment = zkp_proof.public_inputs[0].clone();
     let nullifier = zkp_proof.public_inputs[1].clone();
 
-    // 3. Verify ZKP
-    if !zkp_proof.verified && zkp_proof.proof.is_empty() {
+    // 3. Verify ZKP — NEVER trust client's "verified" flag
+    // TEE must cryptographically verify the Groth16 proof
+    if zkp_proof.proof.is_empty() {
         return ActionResult {
             success: false,
-            error: Some("ZKP verification failed".to_string()),
+            error: Some("ZKP proof is empty".to_string()),
+            ..Default::default()
+        };
+    }
+
+    // Verify the Groth16 proof against the verifying key
+    let proof_verified = verify_groth16_proof(
+        &zkp_proof.proof,
+        &zkp_proof.public_inputs,
+    );
+
+    if !proof_verified {
+        return ActionResult {
+            success: false,
+            error: Some("ZKP cryptographic verification failed — proof is invalid".to_string()),
             ..Default::default()
         };
     }
