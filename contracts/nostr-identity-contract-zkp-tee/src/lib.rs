@@ -595,6 +595,11 @@ pub enum Action {
     Generate {
         account_id: String,
         nep413_response: Nep413AuthResponse,
+        /// Contract to register identity on
+        writer_contract_id: String,
+        /// Optional signing key (TESTING ONLY)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signing_key: Option<String>,
     },
     #[serde(rename = "recover")]
     Recover {
@@ -665,8 +670,8 @@ pub enum Action {
 
 pub fn handle_action(action: Action) -> ActionResult {
     match action {
-        Action::Generate { account_id, nep413_response } => {
-            handle_generate(account_id, nep413_response)
+        Action::Generate { account_id, nep413_response, writer_contract_id, signing_key } => {
+            handle_generate(account_id, nep413_response, writer_contract_id, signing_key)
         }
         Action::Recover { account_id, nep413_response } => {
             handle_recover(account_id, nep413_response)
@@ -734,7 +739,13 @@ pub fn handle_action(action: Action) -> ActionResult {
     }
 }
 
-fn handle_generate(account_id: String, nep413_response: Nep413AuthResponse) -> ActionResult {
+fn handle_generate(
+    account_id: String,
+    nep413_response: Nep413AuthResponse,
+    writer_contract_id: String,
+    signing_key: Option<String>,
+) -> ActionResult {
+    // 1. Verify NEP-413 (proves account ownership + nonce replay protection)
     if let Err(e) = verify_nep413_ownership(&account_id, &nep413_response) {
         return ActionResult {
             success: false,
@@ -743,6 +754,7 @@ fn handle_generate(account_id: String, nep413_response: Nep413AuthResponse) -> A
         };
     }
 
+    // 2. Generate ZKP
     let zkp_proof = match generate_real_zkp(
         &account_id,
         &nep413_response.auth_request.nonce,
@@ -758,17 +770,10 @@ fn handle_generate(account_id: String, nep413_response: Nep413AuthResponse) -> A
         }
     };
 
-    let commitment = &zkp_proof.public_inputs[0];
-    let nullifier = &zkp_proof.public_inputs[1];
+    let commitment = zkp_proof.public_inputs[0].clone();
+    let nullifier = zkp_proof.public_inputs[1].clone();
 
-    if is_commitment_used(commitment) {
-        return ActionResult {
-            success: false,
-            error: Some("This NEAR account already has a Nostr identity".to_string()),
-            ..Default::default()
-        };
-    }
-
+    // 3. Generate Nostr keypair (inside TEE)
     let (npub, nsec) = match generate_nostr_keypair() {
         Ok(keys) => keys,
         Err(e) => {
@@ -780,18 +785,83 @@ fn handle_generate(account_id: String, nep413_response: Nep413AuthResponse) -> A
         }
     };
 
-    let created_at = zkp_proof.timestamp;
-    store_identity(commitment, nullifier, &npub, created_at);
+    // 4. Compute account_hash
+    let account_hash_input = format!("account:{}", account_id);
+    let account_hash = hex::encode(compute_sha256(&account_hash_input));
 
+    // 5. Store locally
+    let created_at = zkp_proof.timestamp;
+    store_identity(&commitment, &nullifier, &npub, created_at);
+
+    // 6. Register on-chain via contract.register(npub, commitment, nullifier, account_hash)
+    let register_args = serde_json::json!({
+        "npub": npub,
+        "commitment": commitment,
+        "nullifier": nullifier,
+        "account_hash": account_hash,
+    });
+
+    let args_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        register_args.to_string(),
+    );
+
+    let tx_nonce = created_at * 1000;
+
+    let actions = vec![
+        serde_json::json!({
+            "FunctionCall": {
+                "method_name": "register",
+                "args": args_b64,
+                "gas": 30000000000000u64,
+                "deposit": "0",
+            }
+        })
+    ];
+
+    let signed_tx = match sign_transaction_with_near_key(
+        "kampouse.testnet".to_string(),
+        writer_contract_id.to_string(),
+        tx_nonce,
+        actions,
+        signing_key,
+    ) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return ActionResult {
+                success: false,
+                error: Some(format!("Failed to sign transaction: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // 7. Submit to NEAR RPC
+    let tx_hash = match submit_transaction_to_near_rpc(&signed_tx) {
+        Ok(hash) => hash,
+        Err(e) => {
+            return ActionResult {
+                success: false,
+                error: Some(format!("Failed to submit transaction: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // 8. Return identity + transaction hash
     let attestation = generate_attestation();
 
     ActionResult {
         success: true,
         npub: Some(npub),
         nsec: Some(nsec),
+        commitment: Some(commitment),
+        nullifier: Some(nullifier),
         zkp_proof: Some(zkp_proof),
         attestation: Some(attestation),
         created_at: Some(created_at),
+        transaction_hash: Some(tx_hash),
+        signed_transaction: Some(signed_tx),
         ..Default::default()
     }
 }
@@ -1297,7 +1367,7 @@ fn handle_prepare_writer_call(
 
     // 7. Create transaction payload for near-signer-tee
     let tx_payload = serde_json::json!({
-        "signer_id": "kampouse.near",  // TEE account
+        "signer_id": "kampouse.testnet",  // TEE account
         "receiver_id": writer_contract_id,
         "nonce": nonce * 1000,  // NEAR nonce needs to be unique
         "block_hash": "FETCH_LATEST_BLOCK_HASH",
@@ -1438,7 +1508,7 @@ fn handle_register_with_zkp(
     ];
 
     let signed_tx = match sign_transaction_with_near_key(
-        "kampouse.near".to_string(),
+        "kampouse.testnet".to_string(),
         writer_contract_id.to_string(),
         tx_nonce,
         actions,
@@ -1608,7 +1678,7 @@ fn sign_transaction_with_near_key(
 
 fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32], u64), String> {
     let rpc_url = std::env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+        .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
 
     // Fetch latest block
     let block_req = serde_json::json!({
@@ -1640,7 +1710,7 @@ fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32]
 
 fn fetch_block_hash() -> Result<[u8; 32], String> {
     let rpc_url = std::env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+        .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
     
     let request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1677,7 +1747,7 @@ fn fetch_block_hash() -> Result<[u8; 32], String> {
 // Submit signed transaction to NEAR RPC
 fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<String, String> {
     let rpc_url = std::env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+        .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
 
     // Get borsh base64 encoded signed transaction
     let borsh_b64 = signed_tx.get("borsh_base64")
