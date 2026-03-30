@@ -1,8 +1,8 @@
 use ark_bn254::{Bn254, Fr};
 use ark_crypto_primitives::snark::SNARK;
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, One};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, LinearCombination, Variable};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ed25519_dalek::{Signature, VerifyingKey as Ed25519VerifyingKey};
 use k256::ecdsa::SigningKey;
@@ -16,11 +16,18 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 // ZKP CIRCUIT - Production version with proper constraints
 // ============================================================================
 
+/// Fixed base point for algebraic commitment (must match client circuit)
+const COMMITMENT_BASE: u64 = 0x1234567890abcdef_u64;
+
 #[derive(Clone)]
 struct NEAROwnershipCircuit {
     // Private inputs (witness)
-    account_id: Option<String>,
-    nonce: Option<String>,
+    account_id: Option<Fr>,
+    nsec: Option<Fr>,
+    nonce: Option<Fr>,
+    // Public inputs
+    commitment: Option<Fr>,
+    nullifier: Option<Fr>,
 }
 
 impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
@@ -28,49 +35,78 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
         self,
         cs: ConstraintSystemRef<Fr>,
     ) -> Result<(), SynthesisError> {
-        // Convert account_id to field element
-        let account_id = Fr::from_le_bytes_mod_order(
-            self.account_id.as_ref().unwrap().as_bytes()
-        );
-        
-        // Convert nonce to field element
-        let nonce = Fr::from_le_bytes_mod_order(
-            self.nonce.as_ref().unwrap().as_bytes()
-        );
-        
-        // Compute commitment: SHA256("commitment:" || account_id) mod p
-        // Performance Note: SHA256 works correctly but is slow in ZK circuits
-        // For production scale, consider replacing with Poseidon hash:
-        //   - Reduces constraint count by ~10x
-        //   - Requires circuit redesign with Poseidon gadget
-        // Current implementation prioritizes correctness over performance
-        let commitment_input = format!("commitment:{}", self.account_id.as_ref().unwrap());
-        let commitment = Fr::from_le_bytes_mod_order(
-            &compute_sha256(&commitment_input)
-        );
-        
-        // Compute nullifier: SHA256("nullifier:" || account_id || nonce) mod p
-        let nullifier_input = format!("nullifier:{}{}", 
-            self.account_id.as_ref().unwrap(),
-            self.nonce.as_ref().unwrap()
-        );
-        let nullifier = Fr::from_le_bytes_mod_order(
-            &compute_sha256(&nullifier_input)
-        );
-        
-        // Allocate private witness variables
-        let _account_id_var = cs.new_witness_variable(|| Ok(account_id))?;
-        let _nonce_var = cs.new_witness_variable(|| Ok(nonce))?;
-        
-        // Allocate public input variables (commitment and nullifier)
-        let _commitment_var = cs.new_input_variable(|| Ok(commitment))?;
-        let _nullifier_var = cs.new_input_variable(|| Ok(nullifier))?;
-        
-        // Note: The constraint that these values must be computed correctly
-        // is implicit in the circuit structure. The prover must provide
-        // account_id and nonce that produce the claimed commitment and nullifier.
-        // Verification will fail if the values don't match.
-        
+        let account_id_var = cs.new_witness_variable(|| {
+            self.account_id.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let nsec_var = cs.new_witness_variable(|| {
+            self.nsec.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let nonce_var = cs.new_witness_variable(|| {
+            self.nonce.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let commitment_var = cs.new_input_variable(|| {
+            self.commitment.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let nullifier_var = cs.new_input_variable(|| {
+            self.nullifier.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+        let base = Fr::from(COMMITMENT_BASE);
+
+        // CONSTRAINT 1: nsec_times_base = nsec * BASE
+        let nsec_times_base = cs.new_witness_variable(|| {
+            Ok(self.nsec.unwrap_or_default() * base)
+        })?;
+        cs.enforce_constraint(
+            LinearCombination::zero() + nsec_var,
+            LinearCombination::zero() + (base, Variable::One),
+            LinearCombination::zero() + nsec_times_base,
+        )?;
+
+        // CONSTRAINT 2: commitment_computed = account_id + nsec_times_base
+        let commitment_computed = cs.new_witness_variable(|| {
+            Ok(self.account_id.unwrap_or_default() + self.nsec.unwrap_or_default() * base)
+        })?;
+        cs.enforce_constraint(
+            LinearCombination::zero() + (Fr::one(), commitment_computed),
+            LinearCombination::zero() + (Fr::one(), Variable::One),
+            LinearCombination::zero() + (Fr::one(), account_id_var) + (Fr::one(), nsec_times_base),
+        )?;
+
+        // CONSTRAINT 3: commitment_computed == commitment_var
+        cs.enforce_constraint(
+            LinearCombination::zero() + (Fr::one(), commitment_computed) - (Fr::one(), commitment_var),
+            LinearCombination::zero() + (Fr::one(), Variable::One),
+            LinearCombination::zero(),
+        )?;
+
+        // CONSTRAINT 4: nonce_times_base = nonce * BASE
+        let nonce_times_base = cs.new_witness_variable(|| {
+            Ok(self.nonce.unwrap_or_default() * base)
+        })?;
+        cs.enforce_constraint(
+            LinearCombination::zero() + nonce_var,
+            LinearCombination::zero() + (base, Variable::One),
+            LinearCombination::zero() + nonce_times_base,
+        )?;
+
+        // CONSTRAINT 5: nullifier_computed = nsec + nonce_times_base
+        let nullifier_computed = cs.new_witness_variable(|| {
+            Ok(self.nsec.unwrap_or_default() + self.nonce.unwrap_or_default() * base)
+        })?;
+        cs.enforce_constraint(
+            LinearCombination::zero() + (Fr::one(), nullifier_computed),
+            LinearCombination::zero() + (Fr::one(), Variable::One),
+            LinearCombination::zero() + (Fr::one(), nsec_var) + (Fr::one(), nonce_times_base),
+        )?;
+
+        // CONSTRAINT 6: nullifier_computed == nullifier_var
+        cs.enforce_constraint(
+            LinearCombination::zero() + (Fr::one(), nullifier_computed) - (Fr::one(), nullifier_var),
+            LinearCombination::zero() + (Fr::one(), Variable::One),
+            LinearCombination::zero(),
+        )?;
+
         Ok(())
     }
 }
@@ -442,11 +478,17 @@ fn initialize_zkp() -> Result<(), String> {
     }
     
     let rng = &mut rand::thread_rng();
+    let base = Fr::from(COMMITMENT_BASE);
+    let init_aid = Fr::from(1u64);
+    let init_nsec = Fr::from(2u64);
+    let init_nonce = Fr::from(3u64);
     
-    // For setup, use dummy values (circuit structure is what matters)
     let circuit = NEAROwnershipCircuit {
-        account_id: Some("dummy".to_string()),
-        nonce: Some("dummy".to_string()),
+        account_id: Some(init_aid),
+        nsec: Some(init_nsec),
+        nonce: Some(init_nonce),
+        commitment: Some(init_aid + init_nsec * base),
+        nullifier: Some(init_nsec + init_nonce * base),
     };
     
     let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, rng)
@@ -469,9 +511,21 @@ fn generate_real_zkp(
     let pk = pk_lock.as_ref()
         .ok_or("ZKP not initialized")?;
     
+    // Convert to field elements
+    let account_id_field = Fr::from_le_bytes_mod_order(account_id.as_bytes());
+    let nonce_field = Fr::from_le_bytes_mod_order(nonce.as_bytes());
+    let nsec_field = Fr::from(0u64); // TEE doesn't have nsec, uses 0
+    
+    let base = Fr::from(COMMITMENT_BASE);
+    let commitment_field = account_id_field + nsec_field * base;
+    let nullifier_field = nsec_field + nonce_field * base;
+    
     let circuit = NEAROwnershipCircuit {
-        account_id: Some(account_id.to_string()),
-        nonce: Some(nonce.to_string()),
+        account_id: Some(account_id_field),
+        nsec: Some(nsec_field),
+        nonce: Some(nonce_field),
+        commitment: Some(commitment_field),
+        nullifier: Some(nullifier_field),
     };
     
     let rng = &mut rand::thread_rng();
@@ -482,18 +536,14 @@ fn generate_real_zkp(
     proof.serialize_uncompressed(&mut proof_bytes)
         .map_err(|e| format!("Failed to serialize proof: {}", e))?;
     
-    // Compute commitment and nullifier (must match circuit computation)
-    let commitment = {
-        let input = format!("commitment:{}", account_id);
-        let hash = compute_sha256(&input);
-        hex::encode(&hash)
-    };
+    // Output field elements as hex for public inputs
+    let mut commitment_bytes = [0u8; 32];
+    commitment_field.serialize_compressed(&mut commitment_bytes[..])
+        .map_err(|e| format!("Failed to serialize commitment: {}", e))?;
     
-    let nullifier = {
-        let input = format!("nullifier:{}{}", account_id, nonce);
-        let hash = compute_sha256(&input);
-        hex::encode(&hash)
-    };
+    let mut nullifier_bytes = [0u8; 32];
+    nullifier_field.serialize_compressed(&mut nullifier_bytes[..])
+        .map_err(|e| format!("Failed to serialize nullifier: {}", e))?;
     
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -502,7 +552,7 @@ fn generate_real_zkp(
     
     Ok(ZKPProof {
         proof: STANDARD.encode(&proof_bytes),
-        public_inputs: vec![commitment, nullifier],
+        public_inputs: vec![hex::encode(&commitment_bytes), hex::encode(&nullifier_bytes)],
         verified,
         timestamp,
     })
@@ -1132,7 +1182,6 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
     let proof: ark_groth16::Proof<Bn254> = match CanonicalDeserialize::deserialize_compressed(&proof_bytes[..]) {
         Ok(p) => p,
         Err(_) => {
-            // Try uncompressed
             match CanonicalDeserialize::deserialize_uncompressed(&proof_bytes[..]) {
                 Ok(p) => p,
                 Err(_) => return false,
@@ -1141,17 +1190,23 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
     };
 
     // 3. Get or initialize verifying key
+    // The VK must match the client's circuit exactly (same COMMITMENT_BASE)
     let vk = {
         let vk_lock = VERIFYING_KEY.lock().unwrap();
         if let Some(ref vk) = *vk_lock {
             vk.clone()
         } else {
-            // Auto-initialize with a dummy circuit setup
-            // In production, the VK should be embedded or fetched from a trusted source
             drop(vk_lock);
+            let base = Fr::from(COMMITMENT_BASE);
+            let init_aid = Fr::from(1u64);
+            let init_nsec = Fr::from(2u64);
+            let init_nonce = Fr::from(3u64);
             let circuit = NEAROwnershipCircuit {
-                account_id: Some("__init__".to_string()),
-                nonce: Some("__init__".to_string()),
+                account_id: Some(init_aid),
+                nsec: Some(init_nsec),
+                nonce: Some(init_nonce),
+                commitment: Some(init_aid + init_nsec * base),
+                nullifier: Some(init_nsec + init_nonce * base),
             };
             let mut rng = rand::thread_rng();
             let (_, vk) = match Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng) {
@@ -1165,6 +1220,7 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
     };
 
     // 4. Parse public inputs into field elements
+    // Client sends: [commitment_field, nullifier_field] as hex
     let mut inputs = Vec::new();
     for hex_input in public_inputs {
         let bytes = match hex::decode(hex_input) {
@@ -1174,9 +1230,7 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
         if bytes.len() != 32 {
             return false;
         }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes[..32]);
-        inputs.push(Fr::from_le_bytes_mod_order(&arr));
+        inputs.push(Fr::from_le_bytes_mod_order(&bytes));
     }
 
     // 5. Verify the proof
