@@ -25,7 +25,7 @@ use near_sdk::{env, near_bindgen, AccountId, BorshStorageKey, PanicOnDefault};
 
 /// Registered identity information.
 /// All fields except npub are opaque hashes — no private data on-chain.
-#[derive(BorshSerialize, BorshDeserialize, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct IdentityInfo {
     /// Nostr public key (hex secp256k1 x-only, 64 chars)
     pub npub: String,
@@ -40,7 +40,7 @@ pub struct IdentityInfo {
 }
 
 /// Result of a verification query
-#[derive(BorshSerialize, BorshDeserialize, serde::Serialize, serde::Deserialize)]
+#[derive(BorshSerialize, BorshDeserialize, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct VerificationResult {
     pub registered: bool,
     pub npub: Option<String>,
