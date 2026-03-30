@@ -1775,12 +1775,48 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
 
     // Check for RPC error
     if let Some(error) = response.get("error") {
-        return Err(format!("RPC error: {}", error));
+        let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+        let data = error.get("data").and_then(|d| d.as_str()).unwrap_or("");
+        return Err(format!("RPC error: {} {}", msg, data));
+    }
+
+    let result = response.get("result")
+        .ok_or("No result in RPC response")?;
+
+    // Check transaction status
+    if let Some(status) = result.get("status") {
+        if let Some(failure) = status.get("Failure") {
+            let error_msg = failure.get("error_message")
+                .or_else(|| failure.get("ExecutionError"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("Transaction failed");
+            return Err(format!("Transaction reverted: {}", error_msg));
+        }
+        // Check for SuccessReceiptId (receipt might fail)
+        if let Some(receipt_id) = status.get("SuccessReceiptId").and_then(|r| r.as_str()) {
+            // Check receipt outcomes for failures
+            if let Some(receipts) = result.get("receipts_outcome").and_then(|r| r.as_array()) {
+                for receipt in receipts {
+                    let is_ours = receipt.get("id").and_then(|id| id.as_str()) == Some(receipt_id);
+                    if is_ours {
+                        if let Some(outcome_status) = receipt.get("outcome")
+                            .and_then(|o| o.get("status"))
+                            .and_then(|s| s.get("Failure")) 
+                        {
+                            let err = outcome_status.get("error_message")
+                                .or_else(|| outcome_status.get("ExecutionError"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Receipt execution failed");
+                            return Err(format!("Transaction reverted: {}", err));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Extract transaction hash
-    let tx_hash = response.get("result")
-        .and_then(|r| r.get("transaction"))
+    let tx_hash = result.get("transaction")
         .and_then(|tx| tx.get("hash"))
         .and_then(|h| h.as_str())
         .or_else(|| {
