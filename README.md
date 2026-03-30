@@ -11,6 +11,80 @@ Bind a Nostr identity (npub/nsec) to a NEAR account using zero-knowledge proofs 
 
 **Result:** On-chain, only the npub, a commitment (nsec-bound), and a nullifier exist. There is zero link to your NEAR account.
 
+## Architecture
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant B as Browser
+    participant W as NEAR Wallet
+    participant T as OutLayer TEE
+    participant N as NEAR Blockchain
+
+    U->>W: Connect wallet
+    W-->>B: accountId
+
+    Note over B: Step 1: Generate keypair locally
+    B->>B: generateNostrKeypair()
+    Note right of B: nsec never leaves the browser
+
+    Note over B: Step 2: Sign message (NEP-413)
+    B->>W: signMessage({message, nonce})
+    W-->>B: signature
+    Note right of B: Proves NEAR account ownership
+
+    Note over B: Step 3: Generate ZKP client-side
+    B->>B: zkp.generate_ownership_proof_with_nsec(accountId, nsec, nonce)
+    Note right of B: commitment = SHA256(account_id + nsec)<br/>nullifier = SHA256(nsec + nonce)<br/>Groth16 proof generated in WASM
+
+    Note over B: Step 4: Send proof to TEE (no nsec, no accountId)
+    B->>T: POST /call {npub, proof, commitment, nullifier}
+
+    Note over T: Inside Trusted Execution Environment
+    T->>T: Verify ZKP proof
+    T->>N: register_via_delegator(commitment, nullifier, proof)
+    Note right of N: On-chain: npub, commitment, nullifier<br/>NO account_id stored
+    N-->>T: transaction_hash
+    T-->>B: {success, transaction_hash}
+
+    B-->>U: Show npub + nsec
+    Note over U: User saves nsec and imports<br/>into any Nostr client
+```
+
+```mermaid
+graph TB
+    subgraph Browser
+        UI[Next.js Frontend]
+        KEYS[Nostr Keypair<br/>generated locally]
+        ZKP[ZKP WASM<br/>Groth16 proof]
+    end
+
+    subgraph OutLayer
+        TEE[TEE Contract<br/>Rust WASM]
+        STORE[Persistent<br/>Encrypted Storage]
+    end
+
+    subgraph NEAR
+        SC[Smart Contract<br/>register_via_delegator]
+        CHAIN[On-chain Storage<br/>commitment + nullifier + npub]
+    end
+
+    UI -->|sign message| WALLET[NEAR Wallet]
+    WALLET -->|NEP-413 signature| UI
+    UI -->|nsec as salt| ZKP
+    ZKP -->|proof + commitment + nullifier| UI
+    UI -->|no nsec, no accountId| TEE
+    TEE -->|verify proof| TEE
+    TEE -->|register| SC
+    SC -->|store| CHAIN
+    TEE <-->|encrypted| STORE
+
+    style KEYS fill:#f9f,stroke:#333
+    style ZKP fill:#ff9,stroke:#333
+    style TEE fill:#9f9,stroke:#333
+    style CHAIN fill:#9cf,stroke:#333
+```
+
 ## Security Model
 
 | Layer | What it does |
