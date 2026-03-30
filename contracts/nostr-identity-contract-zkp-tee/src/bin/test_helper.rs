@@ -18,7 +18,7 @@ fn main() {
                  "ed25519:Bhwrm7J1VD6YS3cNxpTv6xpApGcjvXbmAGottR5v6kZW",
                  "test-writer.near"),
                 // Key 2: kampouse.testnet (funded on testnet)
-                ("ed25519:REDACTED_SIGNING_KEY",
+                ("REDACTED",
                  "ed25519:Eqp85WhR2xvT3SMMLzHvLue44bm7GuW2WPgKUx3yizuy",
                  "kampouse.testnet"),
             ];

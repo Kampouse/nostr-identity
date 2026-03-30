@@ -61,3 +61,4 @@ packages/zkp-wasm/target/
 packages/zkp-wasm/Cargo.lock
 target/
 circom/
+apps/web/.env
