@@ -60,3 +60,4 @@ contracts/*/Cargo.lock
 packages/zkp-wasm/target/
 packages/zkp-wasm/Cargo.lock
 target/
+circom/

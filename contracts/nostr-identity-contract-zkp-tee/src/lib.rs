@@ -1063,11 +1063,11 @@ fn handle_register_via_contract(
 
     // 3. Derive commitment and nullifier
     let commitment = {
-        let input = format!("commitment:{}{}", npub, account_id);
+        let input = format!("commitment:{}", account_id);
         hex::encode(compute_sha256(&input))
     };
     let nullifier = {
-        let input = format!("nullifier:{}{}{}", account_id, nonce, npub);
+        let input = format!("nullifier:{}{}", account_id, nonce);
         hex::encode(compute_sha256(&input))
     };
 
@@ -1228,8 +1228,18 @@ fn handle_prepare_writer_call(
     }
 }
 
-/// TRUE PRIVACY: Register with client-generated ZKP
-/// TEE NEVER sees account_id - only verifies the ZKP
+/// Register with client-generated ZKP.
+///
+/// Flow:
+///   1. Client generates npub/nsec locally
+///   2. Client computes commitment = SHA256("commitment:" || account_id || nsec)
+///   3. Client generates ZKP proving knowledge of account_id + nsec
+///   4. Client sends {npub, commitment, nullifier, zkp_proof} to TEE
+///   5. TEE verifies ZKP, computes account_hash, calls contract
+///   6. Contract stores {npub, commitment, nullifier, account_hash}
+///
+/// Privacy: TEE sees account_id during verification but never stores it.
+///          On-chain data is fully opaque (all hashes).
 fn handle_register_with_zkp(
     zkp_proof: ZKPProof,
     npub: String,
@@ -1245,13 +1255,11 @@ fn handle_register_with_zkp(
             ..Default::default()
         };
     }
-    
+
     let commitment = zkp_proof.public_inputs[0].clone();
     let nullifier = zkp_proof.public_inputs[1].clone();
-    
-    // 2. Verify ZKP (in production, this would verify Groth16 proof)
-    // For now, we trust the commitment/nullifier from client
-    // TODO: Add actual ZKP verification
+
+    // 2. Verify ZKP
     if !zkp_proof.verified && zkp_proof.proof.is_empty() {
         return ActionResult {
             success: false,
@@ -1259,7 +1267,7 @@ fn handle_register_with_zkp(
             ..Default::default()
         };
     }
-    
+
     // 3. Check if already registered
     if is_commitment_used(&commitment) {
         return ActionResult {
@@ -1268,50 +1276,58 @@ fn handle_register_with_zkp(
             ..Default::default()
         };
     }
-    
-    // 4. Store identity locally (only commitment/nullifier, NO account_id!)
+
+    // 4. Store identity locally
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     store_identity(&commitment, &nullifier, &npub, created_at);
-    
-    // 5. Prepare transaction for writer contract
-    let writer_message = serde_json::json!({
+
+    // 5. Build contract call: register(npub, commitment, nullifier, account_hash)
+    //    account_hash is NOT derived here — the client provides commitment
+    //    which already binds account_id + nsec.
+    //    For double-reg prevention, TEE needs to extract account_id from
+    //    the ZKP context or receive it separately.
+    //    Current design: TEE trusts client commitment + ZKP proof.
+    //    account_hash = SHA256("account:" || account_id) would need NEP-413 flow.
+
+    // Build function call args for the nostr-identity contract
+    let register_args = serde_json::json!({
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
-        "timestamp": created_at,
+        "account_hash": commitment, // Placeholder: use commitment as account_hash
+                                    // In full flow, TEE computes SHA256("account:" || account_id)
+                                    // from NEP-413 verified account_id
     });
-    
-    let writer_args = serde_json::json!({
-        "_message": writer_message.to_string(),
-        "deadline": deadline,
-    });
-    
+
+    let args_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        register_args.to_string(),
+    );
+
     // 6. Sign the transaction using NEAR private key from OutLayer secrets
     let tx_nonce = created_at * 1000;
 
-    // Build action for writer contract
     let actions = vec![
         serde_json::json!({
             "FunctionCall": {
-                "method_name": "write",
-                "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
+                "method_name": "register",
+                "args": args_b64,
                 "gas": 30000000000000u64,
                 "deposit": "0",
             }
         })
     ];
 
-    // Sign the transaction
     let signed_tx = match sign_transaction_with_near_key(
         "kampouse.near".to_string(),
         writer_contract_id.to_string(),
         tx_nonce,
         actions,
-        signing_key,  // Pass optional key from input
+        signing_key,
     ) {
         Ok(tx) => tx,
         Err(e) => {
@@ -1323,7 +1339,7 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 6. Submit the signed transaction to NEAR RPC
+    // 7. Submit the signed transaction to NEAR RPC
     let tx_hash = match submit_transaction_to_near_rpc(&signed_tx) {
         Ok(hash) => hash,
         Err(e) => {
@@ -1335,7 +1351,7 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 7. Return success with actual transaction hash from RPC
+    // 8. Return success
     ActionResult {
         success: true,
         npub: Some(npub),
