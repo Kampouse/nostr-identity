@@ -63,7 +63,7 @@ enum StorageKey {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct NostrIdentityContract {
     tee_authority: AccountId,
-    mpc_verifier: Option<AccountId>,
+    verifying_key: Option<String>,
     identities: LookupMap<String, IdentityInfo>,
     commitments: LookupMap<String, String>,
     nullifiers: UnorderedSet<String>,
@@ -75,10 +75,10 @@ pub struct NostrIdentityContract {
 impl NostrIdentityContract {
     /// Initialize the contract with the TEE authority account.
     #[init]
-    pub fn new(tee_authority: AccountId, mpc_verifier: Option<AccountId>) -> Self {
+    pub fn new(tee_authority: AccountId, verifying_key: Option<String>) -> Self {
         Self {
             tee_authority,
-            mpc_verifier,
+            verifying_key,
             identities: LookupMap::new(StorageKey::Identities),
             commitments: LookupMap::new(StorageKey::Commitments),
             nullifiers: UnorderedSet::new(StorageKey::Nullifiers),
@@ -167,12 +167,12 @@ impl NostrIdentityContract {
     }
 
     /// Set or update the MPC verifier contract
-    pub fn set_mpc_verifier(&mut self, mpc_verifier: Option<AccountId>) {
+    pub fn set_verifying_key(&mut self, verifying_key: Option<String>) {
         let caller = env::predecessor_account_id();
         if caller != self.tee_authority {
             env::panic_str("Only TEE authority can set MPC verifier");
         }
-        self.mpc_verifier = mpc_verifier;
+        self.verifying_key = verifying_key;
     }
 
     // ========================================================================
@@ -225,8 +225,8 @@ impl NostrIdentityContract {
     }
 
     /// Get the MPC verifier contract (if set)
-    pub fn get_mpc_verifier(&self) -> Option<AccountId> {
-        self.mpc_verifier.clone()
+    pub fn get_verifying_key(&self) -> Option<String> {
+        self.verifying_key.clone()
     }
 
     /// Verify an identity by commitment.
@@ -289,9 +289,9 @@ mod tests {
 
     #[test]
     fn test_init() {
-        let contract = NostrIdentityContract::new(accounts(TEE), Some("mpc.testnet".parse().unwrap()));
+        let contract = NostrIdentityContract::new(accounts(TEE), Some("vk_placeholder".parse().unwrap()));
         assert_eq!(contract.get_tee_authority(), accounts(TEE));
-        assert_eq!(contract.get_mpc_verifier(), Some("mpc.testnet".parse().unwrap()));
+        assert_eq!(contract.get_verifying_key(), Some("vk_placeholder".parse().unwrap()));
         assert_eq!(contract.get_total_identities(), 0);
     }
 
@@ -415,10 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn test_set_mpc_verifier() {
+    fn test_set_verifying_key() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.set_mpc_verifier(Some("mpc.testnet".parse().unwrap()));
-        assert_eq!(contract.get_mpc_verifier(), Some("mpc.testnet".parse().unwrap()));
+        contract.set_verifying_key(Some("vk_placeholder".parse().unwrap()));
+        assert_eq!(contract.get_verifying_key(), Some("vk_placeholder".parse().unwrap()));
     }
 }
