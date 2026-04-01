@@ -9,6 +9,7 @@ use ark_ff::{PrimeField, One};
 use std::sync::OnceLock;
 use js_sys::Object;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use rand::SeedableRng;
 
 // ============================================================================
 // TRUE PRIVACY WITH FULL GROTH16 ZKP
@@ -161,6 +162,11 @@ static PROVING_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 /// Global verifying key (tiny, embedded)
 static VERIFYING_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 
+/// Hardcoded verifying key (328 bytes, compressed serialization).
+/// Generated deterministically with seed 0x4e4541525a4b5031.
+/// MUST match the TEE's SHARED_VK_HEX exactly for proofs to cross-verify.
+const SHARED_VK_HEX: &str = "1606ca9cc25428ee3469315117bd5d318bcccafaeecfb372e10659ab41077b2b2a951ec907898ec617cf79ea9ce1dc43192b1306d64eca3e1573469f86385b073536efc980fce81b2f3fd9f25d1617e7189aed96c29e3aa1b26a932c59b40f237f66b421fae36371fca1dae6c2f7bba49c884b9751c93ff0d63e4d89f369ad287f28e53961aaac9cde2524083e1778c3b15caa14198fca886f13d52a767ba71c8c584bcd272b49b2fa0abdc9b550ae060f6100bdc6e4ded809dad00647f2c22295ad6219e183656d140b3d550f7027ab22c0825279de2266c65c196c1e3c61200300000000000000581d8f522081c060a8ff1ef87d93ebb43fe9ed1108cd7eb31572ca6f1b4d30125cce279c30c0d9cf0fbdb8b85ae2042da4e4a18546fdd6937adca418bf8ad1acb02e0c98978edd58eebde7466451713f88c4ab97b79eb9040b557929f8f2ed8a";
+
 /// Convert bytes to field element
 fn bytes_to_field(bytes: &[u8]) -> Fr {
     Fr::from_le_bytes_mod_order(bytes)
@@ -191,16 +197,17 @@ pub fn initialize_zkp() -> Result<JsValue, JsValue> {
         nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * Fr::from(COMMITMENT_BASE)),
     };
 
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031); let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
+    // Generate proving key at runtime (client-specific, not shared)
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031); let (pk, _vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| JsValue::from_str(&format!("Setup failed: {}", e)))?;
 
     let mut pk_bytes = Vec::new();
     pk.serialize_compressed(&mut pk_bytes)
         .map_err(|e| JsValue::from_str(&format!("PK serialization failed: {}", e)))?;
 
-    let mut vk_bytes = Vec::new();
-    vk.serialize_compressed(&mut vk_bytes)
-        .map_err(|e| JsValue::from_str(&format!("VK serialization failed: {}", e)))?;
+    // VK comes from hardcoded constant (shared with TEE)
+    let vk_bytes = hex::decode(SHARED_VK_HEX)
+        .map_err(|e| JsValue::from_str(&format!("Invalid shared VK hex: {}", e)))?;
 
     let _ = PROVING_KEY.set(pk_bytes.clone());
     let _ = VERIFYING_KEY.set(vk_bytes.clone());
@@ -385,6 +392,7 @@ pub fn export_verifying_key() -> Result<String, JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn test_commitment() {
@@ -456,6 +464,7 @@ mod tests {
 #[cfg(test)]
 mod vk_print {
     use super::*;
+    use rand::SeedableRng;
     #[test]
     fn print_vk() {
         let base = Fr::from(COMMITMENT_BASE);
@@ -474,6 +483,7 @@ mod vk_print {
 #[cfg(test)]
 mod vk_test {
     use super::*;
+    use rand::SeedableRng;
     
     #[test]
     fn print_vk_hex() {
@@ -485,7 +495,7 @@ mod vk_test {
             commitment: Some(Fr::from(1u64) + Fr::from(2u64) * base),
             nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * base),
         };
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e61726d6f756e6c6c61726d);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
         let (_pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng).unwrap();
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
@@ -496,6 +506,7 @@ mod vk_test {
 #[cfg(test)]
 mod vk_print_test {
     use super::*;
+    use rand::SeedableRng;
     #[test]
     fn print_vk() {
         let base = Fr::from(COMMITMENT_BASE);
