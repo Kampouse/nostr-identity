@@ -191,7 +191,7 @@ pub fn initialize_zkp() -> Result<JsValue, JsValue> {
         nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * Fr::from(COMMITMENT_BASE)),
     };
 
-        let mut rng = rand::rngs::StdRng::seed_from_u64([0x4e61726d6f756e6c61726d, 0x6b65726d65726d696e]); let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031); let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| JsValue::from_str(&format!("Setup failed: {}", e)))?;
 
     let mut pk_bytes = Vec::new();
@@ -271,7 +271,7 @@ pub fn generate_ownership_proof_with_nsec(
     };
     
     // Generate proof
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
     let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng)
         .map_err(|e| JsValue::from_str(&format!("Proof generation failed: {}", e)))?;
     
@@ -463,7 +463,7 @@ mod vk_print {
             account_id: Some(Fr::from(1u64)), nsec: Some(Fr::from(2u64)), nonce: Some(Fr::from(3u64)),
             commitment: Some(Fr::from(1u64) + Fr::from(2u64) * base), nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * base),
         };
-        let mut rng = rand::rngs::StdRng::seed_from_u64([0x4e61726d6f756e6c61726d, 0x6b65726d65726d696e]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
         let (_pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng).unwrap();
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
@@ -490,5 +490,23 @@ mod vk_test {
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
         eprintln!("\nVK_HEX={}", hex::encode(&b));
+    }
+}
+
+#[cfg(test)]
+mod vk_print_test {
+    use super::*;
+    #[test]
+    fn print_vk() {
+        let base = Fr::from(COMMITMENT_BASE);
+        let circuit = NEAROwnershipCircuit {
+            account_id: Some(Fr::from(1u64)), nsec: Some(Fr::from(2u64)), nonce: Some(Fr::from(3u64)),
+            commitment: Some(Fr::from(1u64) + Fr::from(2u64) * base), nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * base),
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
+        let (_pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng).unwrap();
+        let mut b = Vec::new(); vk.serialize_compressed(&mut b).unwrap();
+        eprintln!("VK_HEX={}", hex::encode(&b));
+        assert!(true);
     }
 }
