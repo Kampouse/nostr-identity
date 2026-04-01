@@ -190,7 +190,7 @@ impl NostrIdentityContract {
 
     pub fn get_identity_by_npub(&self, npub: String) -> Option<IdentityInfo> { self.identities.get(&npub) }
     pub fn is_registered(&self, npub: String) -> bool { self.identities.contains_key(&npub) }
-    pub fn get_total_identities(&self) -> u64 { self.total_idunities }
+    pub fn get_total_identities(&self) -> u64 { self.total_identities }
     pub fn get_tee_authority(&self) -> AccountId { self.tee_authority.clone() }
     pub fn is_aurora_verifier_set(&self) -> bool { self.aurora_verifier.is_some() }
 }
