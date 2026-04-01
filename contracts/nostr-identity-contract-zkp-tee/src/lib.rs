@@ -8,7 +8,7 @@ use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 /// Fixed base point for algebraic commitment (must match client circuit)
 use ed25519_dalek::{Signature, VerifyingKey as Ed25519VerifyingKey};
 use k256::ecdsa::SigningKey;
-use rand::RngCore;
+use rand::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashMap;
@@ -114,6 +114,47 @@ fn compute_sha256(input: &str) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// Get or generate the TEE-bound salt for account_hash computation.
+/// The salt is generated once on first use and persisted in TEE storage.
+/// It never leaves the TEE, preventing precomputation attacks on NEAR account names.
+fn get_or_create_salt() -> String {
+    // Check in-memory cache first
+    {
+        let salt_lock = ACCOUNT_HASH_SALT.lock().unwrap();
+        if let Some(ref salt) = *salt_lock {
+            return salt.clone();
+        }
+    }
+
+    // Try persistent TEE storage
+    if let Some(salt) = tee_storage_get("account_hash_salt") {
+        ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
+        return salt;
+    }
+
+    // Generate new salt: 32 random bytes, hex-encoded
+    let mut salt_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let salt = hex::encode(&salt_bytes);
+
+    // Persist in TEE storage
+    tee_storage_set("account_hash_salt", &salt);
+
+    // Cache in memory
+    ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
+
+    salt
+}
+
+/// Compute a salted account_hash that resists precomputation attacks.
+/// Uses: SHA256("account:" || account_id || salt)
+/// The salt is TEE-bound and never exposed publicly.
+fn compute_account_hash(account_id: &str) -> String {
+    let salt = get_or_create_salt();
+    let input = format!("account:{}{}", account_id, salt);
+    hex::encode(compute_sha256(&input))
+}
+
 // ============================================================================
 // API TYPES
 // ============================================================================
@@ -132,6 +173,15 @@ pub struct Nep413AuthRequest {
     pub message: String,
     pub nonce: String,
     pub recipient: String,
+}
+
+/// NEP-413 Borsh payload — matches what wallets sign
+#[derive(borsh::BorshSerialize)]
+struct Nep413BorshPayload<'a> {
+    tag: &'a str,
+    message: &'a str,
+    nonce: &'a [u8],
+    recipient: &'a str,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -214,7 +264,7 @@ extern "C" {
 }
 
 // Helper: Get from persistent storage
-fn tee_storage_get(_key: &str) -> Option<String> {
+fn tee_storage_get(key: &str) -> Option<String> {
     #[cfg(feature = "outlayer-tee")]
     {
         let key_bytes = key.as_bytes();
@@ -247,7 +297,7 @@ fn tee_storage_get(_key: &str) -> Option<String> {
 }
 
 // Helper: Set persistent storage
-fn tee_storage_set(_key: &str, _value: &str) {
+fn tee_storage_set(key: &str, value: &str) {
     #[cfg(feature = "outlayer-tee")]
     {
         let key_bytes = key.as_bytes();
@@ -293,6 +343,10 @@ lazy_static::lazy_static! {
         std::sync::Mutex::new(None);
     static ref USED_NONCES: std::sync::Mutex<HashMap<String, bool>> = 
         std::sync::Mutex::new(HashMap::new());
+    /// TEE-bound salt for account_hash — generated once, never leaves the TEE.
+    /// Prevents precomputation attacks since NEAR account names are public.
+    static ref ACCOUNT_HASH_SALT: std::sync::Mutex<Option<String>> = 
+        std::sync::Mutex::new(None);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -349,16 +403,22 @@ fn verify_nep413_ownership(
             .map_err(|_| "Invalid public key bytes")?,
     ).map_err(|e| format!("Invalid public key: {}", e))?;
 
-    let message = serde_json::to_string(&serde_json::json!({
-        "message": nep413_response.auth_request.message,
-        "nonce": nep413_response.auth_request.nonce,
-        "recipient": nep413_response.auth_request.recipient
-    })).map_err(|e| format!("Failed to serialize message: {}", e))?;
+    // NEP-413 spec: wallet signs SHA-256 of borsh-serialized payload
+    // Payload: { tag: "nep413", message, nonce (raw 32 bytes), recipient, callback_url }
+    // The nonce from the frontend is base64-encoded raw bytes — decode first
+    let nonce_raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &nep413_response.auth_request.nonce)
+        .map_err(|e| format!("Invalid nonce base64: {}", e))?;
 
-    // Hash the message (NEP-413 spec)
-    let mut hasher = Sha256::new();
-    hasher.update(message.as_bytes());
-    let message_hash = hasher.finalize();
+    let borsh_payload = Nep413BorshPayload {
+        tag: "nep413",
+        message: &nep413_response.auth_request.message,
+        nonce: &nonce_raw,
+        recipient: &nep413_response.auth_request.recipient,
+    };
+    let borsh_bytes = borsh::to_vec(&borsh_payload)
+        .map_err(|e| format!("Borsh serialization failed: {}", e))?;
+
+    let message_hash = Sha256::digest(&borsh_bytes);
 
     public_key
         .verify_strict(&message_hash, &signature)
@@ -447,10 +507,11 @@ fn fetch_rpc(url: &str, body: &str) -> Result<String, String> {
 
 fn parse_signature(sig_str: &str) -> Result<Vec<u8>, String> {
     let sig_str = sig_str.strip_prefix("ed25519:").unwrap_or(sig_str);
-    // NEAR uses base58 (bs58) encoding for signatures
-    bs58::decode(sig_str)
-        .into_vec()
-        .map_err(|e| format!("Invalid signature bs58: {}", e))
+    // NEP-413 wallets return base64-encoded signatures
+    // Also try base58 for backward compatibility
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, sig_str)
+        .or_else(|_| bs58::decode(sig_str).into_vec())
+        .map_err(|e| format!("Invalid signature (not base64 or base58): {}", e))
 }
 
 fn parse_public_key(pk_str: &str) -> Result<Vec<u8>, String> {
@@ -473,7 +534,7 @@ fn initialize_zkp() -> Result<(), String> {
         return Ok(());
     }
     
-    let rng = &mut rand::thread_rng();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
     let base = Fr::from(COMMITMENT_BASE);
     let init_aid = Fr::from(1u64);
     let init_nsec = Fr::from(2u64);
@@ -487,7 +548,7 @@ fn initialize_zkp() -> Result<(), String> {
         nullifier: Some(init_nsec + init_nonce * base),
     };
     
-    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, rng)
+    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| format!("Failed to generate ZKP keys: {}", e))?;
     
     *pk_lock = Some(pk);
@@ -524,8 +585,8 @@ fn generate_real_zkp(
         nullifier: Some(nullifier_field),
     };
     
-    let rng = &mut rand::thread_rng();
-    let proof = Groth16::<Bn254>::prove(pk, circuit, rng)
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
+    let proof = Groth16::<Bn254>::prove(pk, circuit, &mut rng)
         .map_err(|e| format!("Failed to generate ZKP: {}", e))?;
     
     let mut proof_bytes = Vec::new();
@@ -831,20 +892,21 @@ fn handle_generate(
         }
     };
 
-    // 4. Compute account_hash
-    let account_hash_input = format!("account:{}", account_id);
-    let account_hash = hex::encode(compute_sha256(&account_hash_input));
+    // 4. Compute account_hash (salted — salt is TEE-bound, never exposed)
+    let account_hash = compute_account_hash(&account_id);
 
     // 5. Store locally
     let created_at = zkp_proof.timestamp;
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 6. Register on-chain via contract.register(npub, commitment, nullifier, account_hash)
+    // 6. Register on-chain with proof — contract verifies Groth16 on-chain
     let register_args = serde_json::json!({
+        "owner": account_id,
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
         "account_hash": account_hash,
+        "proof_b64": zkp_proof.proof,
     });
 
     let args_b64 = base64::Engine::encode(
@@ -859,14 +921,14 @@ fn handle_generate(
             "FunctionCall": {
                 "method_name": "register",
                 "args": args_b64,
-                "gas": 30000000000000u64,
+                "gas": 300000000000000u64,
                 "deposit": "0",
             }
         })
     ];
 
     let signed_tx = match sign_transaction_with_near_key(
-        "kampouse.testnet".to_string(),
+        std::env::var("TEE_SIGNER_ID").unwrap_or_else(|_| "kampouse.testnet".to_string()),
         writer_contract_id.to_string(),
         tx_nonce,
         actions,
@@ -1052,15 +1114,18 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
         }
     };
     
-    let proof = match ark_groth16::Proof::<Bn254>::deserialize_uncompressed(&proof_bytes[..]) {
+    let proof = match ark_groth16::Proof::<Bn254>::deserialize_compressed(&proof_bytes[..]) {
         Ok(p) => p,
-        Err(e) => {
-            return ActionResult {
-                success: false,
-                error: Some(format!("Failed to deserialize proof: {}", e)),
-                verified: Some(false),
-                ..Default::default()
-            };
+        Err(_) => match ark_groth16::Proof::<Bn254>::deserialize_uncompressed(&proof_bytes[..]) {
+            Ok(p) => p,
+            Err(e) => {
+                return ActionResult {
+                    success: false,
+                    error: Some(format!("Failed to deserialize proof: {}", e)),
+                    verified: Some(false),
+                    ..Default::default()
+                };
+            }
         }
     };
     
@@ -1185,20 +1250,24 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
         }
     };
 
-    // 3. Use hardcoded verifying key (matches client circuit exactly)
-    // This VK was generated from the same circuit with same COMMITMENT_BASE
-    // Generated by: packages/zkp-wasm export_verifying_key()
-    const VK_HEX: &str = "89e797e80ef541b7632d2a8426301f52dc06f4ee86b870f9b812408343098f07421a1ee8ff0b06744c32b327115690f377de49378f394e5e3b5be88a826877027db8b6a36be6b35b92c34bf295e8ad31151e360e69fe5c6ae50d290e007beb170864125b212a2751b979178198fac858de4849c419207efc000a9f7ab9b8e5073d5f2e6e1fe2c16a5895a7b88900a4608e0772c7d091e45f78d69d8ade61eb038728f584387cc3be92839a99c34ecad7ba8b72837e9dfb9addf8bda58334791870d406986b93e9aa8074411515baa1191e3817258a8201d065dc5116bc6264100300000000000000d47e373a4c1002e67603b8765445765540e17b4b8286057b6fd09de71d86cd2233f55c352d36be7cafc65b7b2ed861fff5dbf6ad0f2a9b00895a5ba3d6309b9b6f3f7e8824f89f6f487ff377525eabce52b989e86d61f21139408ade607c8c26";
-    
     let vk = {
         let vk_lock = VERIFYING_KEY.lock().unwrap();
         if let Some(ref vk) = *vk_lock {
             vk.clone()
         } else {
             drop(vk_lock);
-            let vk_bytes = hex::decode(VK_HEX).unwrap_or_default();
-            let vk: VerifyingKey<Bn254> = match CanonicalDeserialize::deserialize_compressed(&vk_bytes[..]) {
-                Ok(v) => v,
+            // Generate VK deterministically (same seed as client WASM)
+            let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
+            let base = Fr::from(COMMITMENT_BASE);
+            let init_circuit = NEAROwnershipCircuit {
+                account_id: Some(Fr::from(1u64)),
+                nsec: Some(Fr::from(2u64)),
+                nonce: Some(Fr::from(3u64)),
+                commitment: Some(Fr::from(1u64) + Fr::from(2u64) * base),
+                nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * base),
+            };
+            let (_pk, vk) = match Groth16::<Bn254>::circuit_specific_setup(init_circuit, &mut rng) {
+                Ok(r) => r,
                 Err(_) => return false,
             };
             let mut vk_lock = VERIFYING_KEY.lock().unwrap();
@@ -1399,7 +1468,7 @@ fn handle_prepare_writer_call(
         "commitment": commitment,
         "nullifier": nullifier,
         "timestamp": created_at,
-        "account_hash": hex::encode(compute_sha256(&account_id))[..16].to_string(),
+        "account_hash": compute_account_hash(&account_id),
     });
     
     let writer_args = serde_json::json!({
@@ -1409,7 +1478,7 @@ fn handle_prepare_writer_call(
 
     // 7. Create transaction payload for near-signer-tee
     let tx_payload = serde_json::json!({
-        "signer_id": "kampouse.testnet",  // TEE account
+        "signer_id": std::env::var("TEE_SIGNER_ID").unwrap_or_else(|_| "kampouse.testnet".to_string()),
         "receiver_id": writer_contract_id,
         "nonce": nonce * 1000,  // NEAR nonce needs to be unique
         "block_hash": "FETCH_LATEST_BLOCK_HASH",
@@ -1417,7 +1486,7 @@ fn handle_prepare_writer_call(
             "FunctionCall": {
                 "method_name": "write",
                 "args": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, writer_args.to_string()),
-                "gas": "30000000000000",
+                "gas": "300000000000000",
                 "deposit": "0",
             }
         }],
@@ -1510,9 +1579,8 @@ fn handle_register_with_zkp(
         };
     }
 
-    // 5. Compute account_hash = SHA256("account:" || account_id)
-    let account_hash_input = format!("account:{}", account_id);
-    let account_hash = hex::encode(compute_sha256(&account_hash_input));
+    // 5. Compute account_hash (salted — salt is TEE-bound, never exposed)
+    let account_hash = compute_account_hash(&account_id);
 
     // 6. Store identity locally
     let created_at = std::time::SystemTime::now()
@@ -1522,18 +1590,21 @@ fn handle_register_with_zkp(
 
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 7. Build contract call: register(npub, commitment, nullifier, account_hash)
+    // 7. Register on-chain with proof — contract verifies Groth16 on-chain
     let register_args = serde_json::json!({
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
         "account_hash": account_hash,
+        "proof_b64": zkp_proof.proof,
     });
 
     let args_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         register_args.to_string(),
     );
+
+    // 8. Sign the transaction using NEAR private key from OutLayer secrets
 
     // 8. Sign the transaction using NEAR private key from OutLayer secrets
     let tx_nonce = created_at * 1000;
@@ -1543,14 +1614,14 @@ fn handle_register_with_zkp(
             "FunctionCall": {
                 "method_name": "register",
                 "args": args_b64,
-                "gas": 30000000000000u64,
+                "gas": 300000000000000u64,
                 "deposit": "0",
             }
         })
     ];
 
     let signed_tx = match sign_transaction_with_near_key(
-        "kampouse.testnet".to_string(),
+        std::env::var("TEE_SIGNER_ID").unwrap_or_else(|_| "kampouse.testnet".to_string()),
         writer_contract_id.to_string(),
         tx_nonce,
         actions,
@@ -1668,7 +1739,7 @@ fn sign_transaction_with_near_key(
             let args_b64 = fc.get("args").and_then(|v| v.as_str()).unwrap_or("");
             let args_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, args_b64)
                 .unwrap_or_default();
-            let gas: u64 = fc.get("gas").and_then(|v| v.as_u64()).unwrap_or(30000000000000);
+            let gas: u64 = fc.get("gas").and_then(|v| v.as_u64()).unwrap_or(300000000000000);
             let deposit: u128 = fc.get("deposit")
                 .and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(0);
             tx_actions.push(Action::FunctionCall(FunctionCallAction {
@@ -2030,7 +2101,7 @@ mod tests {
         
         // Should fail because commitment not registered
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("not registered"));
+        assert!(result.error.as_ref().unwrap().contains("not registered"));
         
         // Now register the commitment
         store_identity(
@@ -2044,6 +2115,106 @@ mod tests {
         let result2 = handle_verify_zkp(zkp);
         assert!(result2.success);
         assert_eq!(result2.verified, Some(true));
+    }
+
+    /// Test NEP-413 verification with Borsh-serialized payload
+    /// Simulates what a real NEAR wallet does
+    #[test]
+    fn test_nep413_borsh_verification() {
+        // 1. Create a keypair (simulates wallet's access key)
+        let secret_bytes: [u8; 32] = [0x42; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
+        let verifying_key = signing_key.verifying_key();
+        
+        let account_id = "test-user.testnet";
+        let message = "Generate Nostr identity for test-user.testnet";
+        let nonce_raw: [u8; 32] = [0xab; 32];
+        let recipient = "nostr-identity.near";
+        
+        // 2. Build NEP-413 Borsh payload (what wallet signs)
+        #[derive(borsh::BorshSerialize)]
+        struct Nep413Payload<'a> {
+            tag: &'a str,
+            message: &'a str,
+            nonce: &'a [u8],
+            recipient: &'a str,
+        }
+        
+        let payload = Nep413Payload {
+            tag: "nep413",
+            message,
+            nonce: &nonce_raw,
+            recipient,
+        };
+        let borsh_bytes = borsh::to_vec(&payload).unwrap();
+        let hash = Sha256::digest(&borsh_bytes);
+        
+        // 3. Sign (what wallet does)
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(&hash);
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signature.to_bytes());
+        
+        // 4. Build the auth response (what frontend sends)
+        let nep413_response = Nep413AuthResponse {
+            account_id: account_id.to_string(),
+            public_key: format!("ed25519:{}", bs58::encode(verifying_key.as_bytes()).into_string()),
+            signature: sig_b64,
+            auth_request: Nep413AuthRequest {
+                message: message.to_string(),
+                nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &nonce_raw),
+                recipient: recipient.to_string(),
+            },
+        };
+        
+        // 5. Verify the nonce decoding works
+        let decoded_nonce = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &nep413_response.auth_request.nonce,
+        ).unwrap();
+        assert_eq!(decoded_nonce, nonce_raw.to_vec(), "Nonce base64 roundtrip");
+        
+        // 6. Verify the Borsh payload reconstruction
+        let borsh_payload = crate::Nep413BorshPayload {
+            tag: "nep413",
+            message: &nep413_response.auth_request.message,
+            nonce: &decoded_nonce,
+            recipient: &nep413_response.auth_request.recipient,
+        };
+        let reconstructed = borsh::to_vec(&borsh_payload).unwrap();
+        assert_eq!(reconstructed, borsh_bytes, "Borsh payloads must match");
+        
+        // 7. Verify signature parsing (base64)
+        let parsed_sig = crate::parse_signature(&nep413_response.signature).unwrap();
+        assert_eq!(parsed_sig, signature.to_bytes(), "Signature decode");
+        
+        // 8. Verify the full hash
+        let reconstructed_hash = Sha256::digest(&reconstructed);
+        assert_eq!(reconstructed_hash, hash, "Hashes must match");
+        
+        // 9. Verify signature against hash
+        let sig_obj = Signature::from_bytes(signature.to_bytes().as_slice().try_into().unwrap());
+        verifying_key.verify_strict(&reconstructed_hash, &sig_obj).unwrap();
+        
+        println!("✅ NEP-413 Borsh verification works end-to-end");
+    }
+
+    #[test]
+    fn test_salted_account_hash() {
+        // Two calls with same account_id should produce the same hash (same salt)
+        let hash1 = compute_account_hash("alice.near");
+        let hash2 = compute_account_hash("alice.near");
+        assert_eq!(hash1, hash2, "Same account should produce same salted hash");
+
+        // Different accounts should produce different hashes
+        let hash3 = compute_account_hash("bob.near");
+        assert_ne!(hash1, hash3, "Different accounts should produce different hashes");
+
+        // Salted hash should differ from unsalted (proves salt is applied)
+        let unsalted = hex::encode(compute_sha256(&format!("account:alice.near")));
+        assert_ne!(hash1, unsalted, "Salted hash must differ from unsalted");
+
+        // Hash should be 64 hex chars (SHA256)
+        assert_eq!(hash1.len(), 64);
     }
 }
 pub mod near_tx;
