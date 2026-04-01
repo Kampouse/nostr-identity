@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { encodeBech32, generateNostrKeypair } from '@nostr-identity/crypto'
-import { registerIdentityWithZKP } from './actions'
+import { registerIdentityViaRelayer } from './actions'
 
 let zkpWasm: any = null
 
@@ -148,21 +148,7 @@ export default function Home() {
       const zkp = await initZKP()
       const keypair = generateNostrKeypair()
 
-      const message = `Generate Nostr identity for ${accountId}`
-      const nonceBytes = new Uint8Array(32)
-      crypto.getRandomValues(nonceBytes)
-
-      const wallet = await connector.wallet()
-      const authResponse = await wallet.signMessage({
-        message,
-        nonce: nonceBytes,
-        recipient: 'nostr-identity.near'
-      })
-
-      if (!authResponse || !authResponse.signature) {
-        throw new Error('Wallet signature required')
-      }
-
+      // Step 1: Generate ZKP proof in browser (keys never leave browser)
       const zkpNonce = zkp.generate_nonce()
       const proofResult = zkp.generate_ownership_proof_with_nsec(
         accountId,
@@ -174,22 +160,25 @@ export default function Home() {
         throw new Error('Invalid ZKP proof: missing required fields')
       }
 
-      const data = await registerIdentityWithZKP({
+      // Step 2: Generate pairing input for NEAR's native alt_bn128_pairing_check
+      // This converts the Groth16 proof into 768 bytes that the contract verifies on-chain
+      const pairingInput = zkp.generate_pairing_input(
+        proofResult.proof,
+        proofResult.commitment_field,
+        proofResult.nullifier_field,
+      ) as string
+
+      if (!pairingInput) {
+        throw new Error('Failed to generate pairing input')
+      }
+
+      // Step 3: Send to relayer — relayer submits tx on-chain so user's NEAR account
+      // is NOT visible in the transaction. Privacy preserved.
+      const data = await registerIdentityViaRelayer({
         npub: keypair.publicKeyHex,
-        proof: proofResult.proof,
-        commitmentField: proofResult.commitment_field,
-        nullifierField: proofResult.nullifier_field,
-        accountId: accountId,
-        nep413Response: {
-          accountId: accountId,
-          publicKey: authResponse.publicKey,
-          signature: authResponse.signature,
-          authRequest: {
-            message,
-            nonce: Buffer.from(nonceBytes).toString('base64'),
-            recipient: 'nostr-identity.near',
-          }
-        }
+        commitment: proofResult.commitment,
+        nullifier: proofResult.nullifier,
+        pairingInput,
       })
 
       if (!data.success) {
@@ -267,7 +256,7 @@ export default function Home() {
                   </span>
                 </h2>
                 <p className="text-sm text-[var(--text-secondary)] leading-relaxed max-w-sm mt-4">
-                  Derive a Nostr identity from your NEAR account. Private keys never leave your browser. Zero-knowledge proofs keep the link untraceable.
+                  Derive a Nostr identity from your NEAR account. Private keys never leave your browser. Groth16 proofs verified on-chain with native pairing — zero trust required.
                 </p>
               </div>
 
@@ -291,7 +280,7 @@ export default function Home() {
                     {
                       step: '3',
                       title: 'Prove & register',
-                      desc: 'A zero-knowledge proof is generated and registered on-chain, binding the two identities privately.',
+                      desc: 'A zero-knowledge proof is verified on-chain via native pairing check. No TEE, no trust assumptions — pure math.',
                     },
                   ].map((item) => (
                     <div
@@ -373,9 +362,9 @@ export default function Home() {
                       Generate identity
                     </h3>
                     <p className="text-xs text-[var(--text-muted)] mt-1 leading-relaxed">
-                      Your browser will create a Nostr keypair and build a zero-knowledge proof.
+                      Your browser creates a Nostr keypair and generates a Groth16 zero-knowledge proof.
                       The proof confirms you own a NEAR account without revealing which one.
-                      A TEE (trusted execution environment) verifies everything securely.
+                      Everything stays local — your private key never leaves this browser.
                     </p>
                   </div>
 
@@ -433,7 +422,7 @@ export default function Home() {
                   </p>
                   {identity.transactionHash && (
                     <a
-                      href={`https://explorer.testnet.near.org/transactions/${identity.transactionHash}`}
+                      href={`https://testnet.nearblocks.io/txns/${identity.transactionHash}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]
@@ -538,10 +527,10 @@ export default function Home() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {[
                     'Keys generated in browser',
-                    'ZKP proves ownership',
+                    'Groth16 ZKP verified on-chain',
                     'NEAR account not linked on-chain',
-                    'TEE attestation enforced',
-                    'Not recoverable',
+                    'Native alt_bn128 pairing check',
+                    'No TEE trust assumptions',
                   ].map((item) => (
                     <div key={item} className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
                       <span className="text-[var(--accent-near)] text-[10px]">+</span>
@@ -563,9 +552,9 @@ export default function Home() {
               className="hover:text-[var(--text-secondary)] transition-colors">
               NEAR Protocol
             </a>
-            <a href="https://outlayer.fastnear.com" target="_blank" rel="noopener noreferrer"
+            <a href="https://testnet.nearblocks.io/address/nostr-identity.kampouse.testnet" target="_blank" rel="noopener noreferrer"
               className="hover:text-[var(--text-secondary)] transition-colors">
-              OutLayer TEE
+              Contract
             </a>
           </div>
           <span className="text-[10px] text-[var(--text-muted)]">

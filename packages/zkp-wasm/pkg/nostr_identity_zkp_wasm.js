@@ -1,21 +1,47 @@
 /* @ts-self-types="./nostr_identity_zkp_wasm.d.ts" */
 
 /**
- * Compute commitment from account_id
- * commitment = SHA256("commitment:" || account_id) mod p
+ * Compute SHA256 commitment from account_id + nsec (for off-circuit use)
  * @param {string} account_id
+ * @param {string} nsec_hex
  * @returns {string}
  */
-export function compute_commitment(account_id) {
-    let deferred2_0;
-    let deferred2_1;
+export function compute_commitment(account_id, nsec_hex) {
+    let deferred3_0;
+    let deferred3_1;
     try {
         const ptr0 = passStringToWasm0(account_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.compute_commitment(ptr0, len0);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
+        const ptr1 = passStringToWasm0(nsec_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.compute_commitment(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Export the verifying key as base64 (for embedding in TEE)
+ * The TEE uses this same VK to verify client proofs
+ * @returns {string}
+ */
+export function export_verifying_key() {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.export_verifying_key();
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
@@ -39,13 +65,12 @@ export function generate_nonce() {
 }
 
 /**
- * Generate ownership proof using Nostr private key as salt
- * This provides MAXIMUM privacy because:
- * 1. nsec has 256-bit entropy (impossible to brute-force)
- * 2. nsec is already kept secret by user
- * 3. nsec is already part of Nostr ecosystem
+ * Generate ownership proof using Nostr private key
  *
- * commitment_hash = SHA256(SHA256(account_id + nsec))
+ * commitment = SHA256(SHA256(account_id || nsec_hex))
+ * nullifier = SHA256(nsec_hex || nonce)
+ *
+ * The ZKP proves knowledge of account_id and nsec WITHOUT revealing them.
  * @param {string} account_id
  * @param {string} nsec_hex
  * @param {string} nonce
@@ -66,6 +91,42 @@ export function generate_ownership_proof_with_nsec(account_id, nsec_hex, nonce) 
 }
 
 /**
+ * Generate the 768-byte pairing input for NEAR's alt_bn128_pairing_check host function.
+ * Takes the ark-serialized proof and public input field elements.
+ * Returns base64-encoded 768 bytes = 4 × (G1[64] + G2[128]).
+ *
+ * Pairing equation: e(-α,β) · e(-ic_sum,γ) · e(-C,δ) · e(A,B) == 1
+ * @param {string} proof_b64
+ * @param {string} commitment_field_hex
+ * @param {string} nullifier_field_hex
+ * @returns {string}
+ */
+export function generate_pairing_input(proof_b64, commitment_field_hex, nullifier_field_hex) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(proof_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(commitment_field_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(nullifier_field_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.generate_pairing_input(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
  * Get current timestamp
  * @returns {bigint}
  */
@@ -76,7 +137,6 @@ export function get_timestamp() {
 
 /**
  * Initialize ZKP system - call once on first visit
- * Downloads proving key (17 KB) and stores in IndexedDB
  * @returns {any}
  */
 export function initialize_zkp() {
@@ -89,17 +149,20 @@ export function initialize_zkp() {
 
 /**
  * Verify ownership proof
- * Anyone can verify WITHOUT knowing account_id
+ * Anyone can verify WITHOUT knowing account_id or nsec
  * @param {string} proof_b64
- * @param {string} commitment_hex
+ * @param {string} commitment_field_hex
+ * @param {string} nullifier_field_hex
  * @returns {any}
  */
-export function verify_ownership_proof(proof_b64, commitment_hex) {
+export function verify_ownership_proof(proof_b64, commitment_field_hex, nullifier_field_hex) {
     const ptr0 = passStringToWasm0(proof_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(commitment_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passStringToWasm0(commitment_field_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.verify_ownership_proof(ptr0, len0, ptr1, len1);
+    const ptr2 = passStringToWasm0(nullifier_field_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.verify_ownership_proof(ptr0, len0, ptr1, len1, ptr2, len2);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

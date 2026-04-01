@@ -1,11 +1,12 @@
 use wasm_bindgen::prelude::*;
 use sha2::{Sha256, Digest};
-use ark_bn254::{Bn254, Fr};
-use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
+use ark_bn254::{Bn254, Fr, G1Affine, G2Affine, G1Projective};
+use ark_ec::{CurveGroup, AffineRepr};
+use ark_groth16::{Groth16, ProvingKey, VerifyingKey, Proof};
 use ark_crypto_primitives::snark::SNARK;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable, LinearCombination};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
-use ark_ff::{PrimeField, One};
+use ark_ff::{PrimeField, One, Field};
 use std::sync::OnceLock;
 use js_sys::Object;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -350,6 +351,100 @@ pub fn verify_ownership_proof(
     js_sys::Reflect::set(&result, &"message".into(), &message.into())?;
 
     Ok(result.into())
+}
+
+/// Generate the 768-byte pairing input for NEAR's alt_bn128_pairing_check host function.
+/// Takes the ark-serialized proof and public input field elements.
+/// Returns base64-encoded 768 bytes = 4 × (G1[64] + G2[128]).
+///
+/// Pairing equation: e(-α,β) · e(-ic_sum,γ) · e(-C,δ) · e(A,B) == 1
+#[wasm_bindgen]
+pub fn generate_pairing_input(
+    proof_b64: &str,
+    commitment_field_hex: &str,
+    nullifier_field_hex: &str,
+) -> Result<String, JsValue> {
+    let vk_bytes = VERIFYING_KEY.get()
+        .ok_or_else(|| JsValue::from_str("ZKP not initialized"))?;
+    let vk: VerifyingKey<Bn254> = CanonicalDeserialize::deserialize_compressed(&vk_bytes[..])
+        .map_err(|e| JsValue::from_str(&format!("VK deserialize failed: {}", e)))?;
+
+    // Deserialize proof
+    let proof_bytes = STANDARD.decode(proof_b64)
+        .map_err(|e| JsValue::from_str(&format!("Bad proof base64: {}", e)))?;
+    let proof: Proof<Bn254> = CanonicalDeserialize::deserialize_compressed(&proof_bytes[..])
+        .map_err(|e| JsValue::from_str(&format!("Proof deserialize failed: {}", e)))?;
+
+    // Parse public inputs
+    let commitment_field = hex_to_field(commitment_field_hex)
+        .map_err(|e| JsValue::from_str(&format!("Bad commitment field: {}", e)))?;
+    let nullifier_field = hex_to_field(nullifier_field_hex)
+        .map_err(|e| JsValue::from_str(&format!("Bad nullifier field: {}", e)))?;
+    let public_inputs = [commitment_field, nullifier_field];
+
+    // Compute ic_sum = IC[0] + Σ(input_i * IC[i+1])
+    let mut ic_sum = G1Projective::from(vk.gamma_abc_g1[0]);
+    for (i, input) in public_inputs.iter().enumerate() {
+        let scalar_mul = G1Projective::from(vk.gamma_abc_g1[i + 1]) * input;
+        ic_sum += scalar_mul;
+    }
+    let ic_sum_affine = G1Affine::from(ic_sum);
+
+    // Local verification check
+    let pvk = ark_groth16::prepare_verifying_key(&vk);
+    let valid = ark_groth16::Groth16::<Bn254>::verify_proof(&pvk, &proof, &public_inputs)
+        .map_err(|e| JsValue::from_str(&format!("Verify error: {}", e)))?;
+    if !valid {
+        return Err(JsValue::from_str("Local verification failed — proof is invalid"));
+    }
+
+    // Negate G1 points (negate y coordinate)
+    let neg_g1 = |p: G1Affine| -> G1Affine {
+        if p.is_zero() { return p; }
+        let mut neg = p;
+        neg.y = -neg.y;
+        neg
+    };
+
+    let neg_alpha = neg_g1(vk.alpha_g1);
+    let neg_ic_sum = neg_g1(ic_sum_affine);
+    let neg_proof_c = neg_g1(proof.c);
+
+    // Encode G1: x[32 BE] | y[32 BE] = 64 bytes
+    let encode_g1 = |p: &G1Affine| -> [u8; 64] {
+        let mut buf = [0u8; 64];
+        p.x.serialize_uncompressed(&mut buf[0..32]).unwrap();
+        p.y.serialize_uncompressed(&mut buf[32..64]).unwrap();
+        buf
+    };
+
+    // Encode G2: x_c0[32] | x_c1[32] | y_c0[32] | y_c1[32] = 128 bytes
+    let encode_g2 = |p: &G2Affine| -> [u8; 128] {
+        let mut buf = [0u8; 128];
+        p.x.c0.serialize_uncompressed(&mut buf[0..32]).unwrap();
+        p.x.c1.serialize_uncompressed(&mut buf[32..64]).unwrap();
+        p.y.c0.serialize_uncompressed(&mut buf[64..96]).unwrap();
+        p.y.c1.serialize_uncompressed(&mut buf[96..128]).unwrap();
+        buf
+    };
+
+    // Build 768 bytes: 4 tuples of (G1, G2)
+    let mut pairing_input = Vec::with_capacity(768);
+    // Tuple 1: (-α, β)
+    pairing_input.extend_from_slice(&encode_g1(&neg_alpha));
+    pairing_input.extend_from_slice(&encode_g2(&vk.beta_g2));
+    // Tuple 2: (-ic_sum, γ)
+    pairing_input.extend_from_slice(&encode_g1(&neg_ic_sum));
+    pairing_input.extend_from_slice(&encode_g2(&vk.gamma_g2));
+    // Tuple 3: (-C, δ)
+    pairing_input.extend_from_slice(&encode_g1(&neg_proof_c));
+    pairing_input.extend_from_slice(&encode_g2(&vk.delta_g2));
+    // Tuple 4: (A, B)
+    pairing_input.extend_from_slice(&encode_g1(&proof.a));
+    pairing_input.extend_from_slice(&encode_g2(&proof.b));
+
+    assert_eq!(pairing_input.len(), 768);
+    Ok(STANDARD.encode(&pairing_input))
 }
 
 /// Compute SHA256 commitment from account_id + nsec (for off-circuit use)

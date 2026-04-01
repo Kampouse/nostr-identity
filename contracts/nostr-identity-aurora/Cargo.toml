@@ -1,6 +1,6 @@
 [package]
 name = "nostr-identity"
-version = "2.1.0"
+version = "4.0.0"
 edition = "2021"
 
 [lib]
@@ -9,23 +9,32 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "gen-proof"
 path = "src/bin/gen_proof.rs"
+required-features = ["bin"]
 
 [dependencies]
 near-sdk = { version = "=5.8.1", features = ["legacy"] }
 borsh = "1.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-base64 = "0.22"
 hex = "0.4"
-ark-bn254 = "0.4"
-ark-groth16 = "0.4"
-ark-serialize = "0.4"
-ark-ff = "0.4"
-ark-ec = "0.4"
-ark-crypto-primitives = "0.4"
-ark-relations = "0.4"
-ark-std = "0.4"
-rand = "0.8"
+base64 = "0.22"
+
+# For gen-proof binary only
+ark-bn254 = { version = "0.4", optional = true }
+ark-groth16 = { version = "0.4", optional = true }
+ark-serialize = { version = "0.4", optional = true }
+ark-ff = { version = "0.4", optional = true }
+ark-ec = { version = "0.4", optional = true }
+ark-crypto-primitives = { version = "0.4", optional = true }
+ark-relations = { version = "0.4", optional = true }
+ark-std = { version = "0.4", optional = true }
+num-bigint = { version = "0.4", optional = true }
+rand = { version = "0.8", optional = true }
+getrandom = { version = "0.2", features = ["custom"], optional = true }
+
+[features]
+default = []
+bin = ["ark-bn254", "ark-groth16", "ark-serialize", "ark-ff", "ark-ec", "ark-crypto-primitives", "ark-relations", "ark-std", "num-bigint", "rand", "getrandom"]
 
 [profile.release]
 codegen-units = 1

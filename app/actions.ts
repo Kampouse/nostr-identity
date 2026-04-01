@@ -1,102 +1,99 @@
 'use server'
 
-import { TeeResponse } from '@nostr-identity/types'
+import {
+  JsonRpcProvider,
+  KeyPair,
+  KeyPairSigner,
+  createTransaction,
+  actions,
+  baseDecode,
+} from 'near-api-js'
 
-const OUTLAYER_API_BASE = 'https://api.outlayer.fastnear.com/call'
-const PROJECT_ID = process.env.OUTLAYER_PROJECT_ID || 'kampouse.near/nostr-identity-tee'
-const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
 const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.kampouse.testnet'
+const NETWORK_ID = 'testnet'
+const RPC_URL = 'https://rpc.testnet.fastnear.com'
 
-interface Nep413Response {
-  accountId: string
-  publicKey: string
-  signature: string
-  authRequest: {
-    message: string
-    nonce: string
-    recipient: string
-  }
+const RELAYER_ACCOUNT_ID = process.env.RELAYER_ACCOUNT_ID || 'kampouse.testnet'
+const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY || ''
+
+interface RegisterParams {
+  npub: string
+  commitment: string
+  nullifier: string
+  pairingInput: string
 }
 
-export async function registerIdentityWithZKP(params: {
-  npub: string
-  proof: string
-  commitmentField: string
-  nullifierField: string
-  accountId: string
-  nep413Response: Nep413Response
-  contractId?: string
-}): Promise<TeeResponse> {
+export async function registerIdentityViaRelayer(params: RegisterParams): Promise<{
+  success: boolean
+  transaction_hash?: string
+  created_at?: number
+  error?: string
+}> {
+  const { npub, commitment, nullifier, pairingInput } = params
+
   try {
-    const { npub, proof, commitmentField, nullifierField, accountId, nep413Response, contractId } = params
-
-    if (!PAYMENT_KEY) {
-      throw new Error('OUTLAYER_PAYMENT_KEY environment variable is not set')
+    if (!RELAYER_PRIVATE_KEY) {
+      throw new Error('RELAYER_PRIVATE_KEY not configured — server cannot relay transactions')
     }
+    if (!npub || npub.length !== 64) throw new Error('Invalid npub: must be 64 hex chars')
+    if (!commitment || commitment.length !== 64) throw new Error('Invalid commitment')
+    if (!nullifier || nullifier.length !== 64) throw new Error('Invalid nullifier')
+    if (!pairingInput) throw new Error('Missing pairing input')
 
-    const contractIdFinal = contractId || CONTRACT_ID
+    const provider = new JsonRpcProvider({ url: RPC_URL })
 
-    // Send to TEE: proof, field elements (algebraic commitment), NEP-413 auth
-    // TEE verifies NEP-413 (proves account ownership) + ZKP (proves knowledge of nsec)
-    // TEE NEVER sees nsec
-    const requestBody = {
-      input: {
-        action: 'register_with_zkp',
-        npub,
-        zkp_proof: {
-          proof,
-          // Public inputs = algebraic field elements (what the circuit constrains)
-          public_inputs: [commitmentField, nullifierField],
-          verified: false, // TEE ignores this, verifies cryptographically
-          timestamp: Math.floor(Date.now() / 1000),
-        },
-        account_id: accountId,
-        nep413_response: {
-          account_id: nep413Response.accountId,
-          public_key: nep413Response.publicKey,
-          signature: nep413Response.signature,
-          authRequest: {
-            message: nep413Response.authRequest.message,
-            nonce: nep413Response.authRequest.nonce,
-            recipient: nep413Response.authRequest.recipient,
-          },
-        },
-        writer_contract_id: contractIdFinal,
-        deadline: Math.floor(Date.now() / 1000) + 3600,
-      },
-      async: false,
-    }
+    const keyPair = KeyPair.fromString(RELAYER_PRIVATE_KEY)
+    const signer = new KeyPairSigner(keyPair)
+    const publicKey = keyPair.getPublicKey()
 
-    const response = await fetch(`${OUTLAYER_API_BASE}/${PROJECT_ID}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Payment-Key': PAYMENT_KEY,
-        'X-Compute-Limit': '200000',
-      },
-      body: JSON.stringify(requestBody),
+    // Get relayer's access key nonce
+    const accessKey: any = await provider.query({
+      request_type: 'view_access_key',
+      account_id: RELAYER_ACCOUNT_ID,
+      public_key: publicKey.toString(),
+      finality: 'final',
     })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`OutLayer API returned ${response.status}: ${errorText}`)
+    const nonce = BigInt(accessKey.nonce) + 1n
+    const recentBlock = await provider.block({ finality: 'final' })
+    const blockHash = baseDecode(recentBlock.header.hash)
+
+    const args = {
+      owner: RELAYER_ACCOUNT_ID,
+      npub,
+      commitment,
+      nullifier,
+      pairing_input: pairingInput,
     }
 
-    const result = await response.json()
+    const transaction = createTransaction(
+      RELAYER_ACCOUNT_ID,
+      publicKey,
+      CONTRACT_ID,
+      nonce,
+      [
+        actions.functionCall(
+          'register',
+          Buffer.from(JSON.stringify(args)),
+          50000000000000n,
+          0n,
+        ),
+      ],
+      blockHash,
+    )
 
-    if (result.status === 'failed') {
-      throw new Error(`TEE execution failed: ${result.error}`)
+    const signedTx = await signer.signTransaction(transaction)
+    const result = await provider.sendTransaction(signedTx)
+
+    const txHash = result.transaction?.hash || ''
+
+    return {
+      success: true,
+      transaction_hash: txHash,
+      created_at: Date.now(),
     }
-
-    const output = typeof result.output === 'string' ? JSON.parse(result.output) : result.output
-
-    if (!output.success) {
-      throw new Error(output.error || 'TEE registration failed')
-    }
-
-    return output as TeeResponse
   } catch (error: any) {
-    console.error('Registration error:', error)
-    throw new Error(error.message || 'Failed to register identity')
+    console.error('Relayer registration error:', error)
+    return { success: false, error: error.message || 'Relayer failed' }
   }
 }

@@ -23,6 +23,7 @@ ark-groth16 = "0.4"
 ark-crypto-primitives = "0.4"
 ark-relations = "0.4"
 ark-ff = "0.4"
+ark-ec = "0.4"
 ark-serialize = "0.4"
 ark-std = "0.4"
 
