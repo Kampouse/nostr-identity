@@ -523,17 +523,48 @@ fn parse_public_key(pk_str: &str) -> Result<Vec<u8>, String> {
 }
 
 // ============================================================================
+// SHARED VERIFYING KEY — generated once, embedded in both TEE and client WASM
+// ============================================================================
+
+/// Hardcoded verifying key (328 bytes, compressed serialization).
+/// Generated deterministically with seed 0x4e4541525a4b5031.
+/// Both TEE and client WASM use this exact key so proofs cross-verify.
+const SHARED_VK_HEX: &str = "1606ca9cc25428ee3469315117bd5d318bcccafaeecfb372e10659ab41077b2b2a951ec907898ec617cf79ea9ce1dc43192b1306d64eca3e1573469f86385b073536efc980fce81b2f3fd9f25d1617e7189aed96c29e3aa1b26a932c59b40f237f66b421fae36371fca1dae6c2f7bba49c884b9751c93ff0d63e4d89f369ad287f28e53961aaac9cde2524083e1778c3b15caa14198fca886f13d52a767ba71c8c584bcd272b49b2fa0abdc9b550ae060f6100bdc6e4ded809dad00647f2c22295ad6219e183656d140b3d550f7027ab22c0825279de2266c65c196c1e3c61200300000000000000581d8f522081c060a8ff1ef87d93ebb43fe9ed1108cd7eb31572ca6f1b4d30125cce279c30c0d9cf0fbdb8b85ae2042da4e4a18546fdd6937adca418bf8ad1acb02e0c98978edd58eebde7466451713f88c4ab97b79eb9040b557929f8f2ed8a";
+
+/// Load the shared verifying key from the hardcoded constant.
+fn load_shared_vk() -> Result<VerifyingKey<Bn254>, String> {
+    let vk_bytes = hex::decode(SHARED_VK_HEX)
+        .map_err(|e| format!("Invalid VK hex: {}", e))?;
+    CanonicalDeserialize::deserialize_compressed(&vk_bytes[..])
+        .map_err(|e| format!("VK deserialization failed: {}", e))
+}
+
+/// Load the shared verifying key, caching it in memory.
+fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
+    {
+        let vk_lock = VERIFYING_KEY.lock().unwrap();
+        if vk_lock.is_some() {
+            return Ok(vk_lock.as_ref().unwrap().clone());
+        }
+    }
+    let vk = load_shared_vk()?;
+    let mut vk_lock = VERIFYING_KEY.lock().unwrap();
+    *vk_lock = Some(vk.clone());
+    Ok(vk)
+}
+
+// ============================================================================
 // REAL ZKP GENERATION
 // ============================================================================
 
 fn initialize_zkp() -> Result<(), String> {
     let mut pk_lock = PROVING_KEY.lock().unwrap();
-    let mut vk_lock = VERIFYING_KEY.lock().unwrap();
     
-    if pk_lock.is_some() && vk_lock.is_some() {
+    if pk_lock.is_some() {
         return Ok(());
     }
     
+    // Proving key must be generated at runtime (not shared — only TEE proves)
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
     let base = Fr::from(COMMITMENT_BASE);
     let init_aid = Fr::from(1u64);
@@ -548,11 +579,14 @@ fn initialize_zkp() -> Result<(), String> {
         nullifier: Some(init_nsec + init_nonce * base),
     };
     
-    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
+    let (pk, _vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| format!("Failed to generate ZKP keys: {}", e))?;
     
     *pk_lock = Some(pk);
-    *vk_lock = Some(vk);
+    
+    // VK is loaded from hardcoded constant (see get_cached_vk)
+    // Ensure it's cached
+    get_cached_vk()?;
     
     Ok(())
 }
@@ -1161,14 +1195,13 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
     let commitment_fr = Fr::from_le_bytes_mod_order(&commitment_bytes);
     let nullifier_fr = Fr::from_le_bytes_mod_order(&nullifier_bytes);
     
-    // Get verifying key
-    let vk_lock = VERIFYING_KEY.lock().unwrap();
-    let vk = match vk_lock.as_ref() {
-        Some(vk) => vk,
-        None => {
+    // Get verifying key from hardcoded constant
+    let vk = match get_cached_vk() {
+        Ok(vk) => vk,
+        Err(e) => {
             return ActionResult {
                 success: false,
-                error: Some("Verifying key not initialized".to_string()),
+                error: Some(format!("Verifying key load failed: {}", e)),
                 verified: Some(false),
                 ..Default::default()
             };
@@ -1178,7 +1211,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
     // Verify the Groth16 proof
     let public_inputs = vec![commitment_fr, nullifier_fr];
     
-    let is_valid = Groth16::<Bn254>::verify(vk, &public_inputs, &proof)
+    let is_valid = Groth16::<Bn254>::verify(&vk, &public_inputs, &proof)
         .map_err(|e| format!("Proof verification failed: {}", e));
     
     match is_valid {
@@ -1230,7 +1263,7 @@ fn handle_check_commitment(commitment: String) -> ActionResult {
     }
 }
 
-/// Verify a Groth16 proof against the stored verifying key.
+/// Verify a Groth16 proof against the shared verifying key.
 /// Returns true if the proof is cryptographically valid.
 fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
     // 1. Decode base64 proof
@@ -1250,30 +1283,10 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
         }
     };
 
-    let vk = {
-        let vk_lock = VERIFYING_KEY.lock().unwrap();
-        if let Some(ref vk) = *vk_lock {
-            vk.clone()
-        } else {
-            drop(vk_lock);
-            // Generate VK deterministically (same seed as client WASM)
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
-            let base = Fr::from(COMMITMENT_BASE);
-            let init_circuit = NEAROwnershipCircuit {
-                account_id: Some(Fr::from(1u64)),
-                nsec: Some(Fr::from(2u64)),
-                nonce: Some(Fr::from(3u64)),
-                commitment: Some(Fr::from(1u64) + Fr::from(2u64) * base),
-                nullifier: Some(Fr::from(2u64) + Fr::from(3u64) * base),
-            };
-            let (_pk, vk) = match Groth16::<Bn254>::circuit_specific_setup(init_circuit, &mut rng) {
-                Ok(r) => r,
-                Err(_) => return false,
-            };
-            let mut vk_lock = VERIFYING_KEY.lock().unwrap();
-            *vk_lock = Some(vk.clone());
-            vk
-        }
+    // 3. Load the shared VK (hardcoded constant, same as client WASM)
+    let vk = match get_cached_vk() {
+        Ok(vk) => vk,
+        Err(_) => return false,
     };
 
     // 4. Parse public inputs into field elements
@@ -2218,3 +2231,17 @@ mod tests {
     }
 }
 pub mod near_tx;
+
+#[cfg(test)]
+mod vk_export {
+    use super::*;
+    #[test]
+    fn export_vk_hex() {
+        initialize_zkp().unwrap();
+        let vk_lock = VERIFYING_KEY.lock().unwrap();
+        let vk = vk_lock.as_ref().unwrap();
+        let mut b = Vec::new();
+        vk.serialize_compressed(&mut b).unwrap();
+        eprintln!("\n\nSHARED_VK_HEX={}\nSHARED_VK_LEN={}\n\n", hex::encode(&b), b.len());
+    }
+}
