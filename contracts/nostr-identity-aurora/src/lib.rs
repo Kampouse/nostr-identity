@@ -25,7 +25,6 @@ pub struct IdentityInfo {
     pub nullifier: String,
     pub created_at: u64,
     pub owner: AccountId,
-    pub account_hash: String,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -34,7 +33,6 @@ struct PendingReg {
     npub: String,
     commitment: String,
     nullifier: String,
-    account_hash: String,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, BorshStorageKey)]
@@ -57,48 +55,38 @@ fn u256be(v: u64) -> [u8; 32] {
     b
 }
 
-/// ABI-encode verify(uint256[],uint256[2],uint256[4],uint256[2])
 fn evm_calldata(inputs: &[[u8; 32]], proof: &[u8]) -> Vec<u8> {
     let n = inputs.len() as u64;
     let pa = 128 + 32 + n * 32;
     let pb = pa + 64;
     let pc = pb + 128;
     let mut d = Vec::with_capacity(512);
-    d.extend_from_slice(&[0xb0, 0x98, 0xdf, 0xe6]); // selector
+    d.extend_from_slice(&[0xb0, 0x98, 0xdf, 0xe6]);
     d.extend_from_slice(&u256be(128));
     d.extend_from_slice(&u256be(pa));
     d.extend_from_slice(&u256be(pb));
     d.extend_from_slice(&u256be(pc));
     d.extend_from_slice(&u256be(n));
     for inp in inputs { d.extend_from_slice(inp); }
-    d.extend_from_slice(&proof[0..64]);    // pA
-    d.extend_from_slice(&proof[64..192]);  // pB
-    d.extend_from_slice(&proof[192..256]); // pC
+    d.extend_from_slice(&proof[0..64]);
+    d.extend_from_slice(&proof[64..192]);
+    d.extend_from_slice(&proof[192..256]);
     d
 }
 
-/// Aurora CallArgs borsh: Sender(NearAccountId) + Transaction
 fn aurora_args(verifier_hex: &str, calldata: &[u8]) -> Vec<u8> {
     let mut a = Vec::new();
-    // Sender::NearAccountId (tag 0)
     a.push(0u8);
     let caller = env::current_account_id().to_string();
     borsh::BorshSerialize::serialize(&caller, &mut a).unwrap();
-    // nonce
     borsh::BorshSerialize::serialize(&0u64, &mut a).unwrap();
-    // max_priority_fee_per_gas: [u8;32] LE
     a.extend_from_slice(&[0u8; 32]);
-    // max_fee_per_gas: [u8;32] LE
     let mut fee = [0u8; 32]; fee[0] = 100;
     a.extend_from_slice(&fee);
-    // gas_limit
     borsh::BorshSerialize::serialize(&5_000_000u64, &mut a).unwrap();
-    // to: Some([u8;20])
     a.push(1u8);
     a.extend_from_slice(&hex::decode(verifier_hex).expect("bad addr"));
-    // value: [u8;32] = 0
     a.extend_from_slice(&[0u8; 32]);
-    // data
     borsh::BorshSerialize::serialize(&calldata.to_vec(), &mut a).unwrap();
     a
 }
@@ -124,13 +112,15 @@ impl NostrIdentityContract {
         self.aurora_verifier = Some(address);
     }
 
+    /// Register identity with Aurora cross-contract ZK verification.
+    /// No account_hash stored on-chain — zero link to NEAR accounts.
+    /// account_hash dedup handled internally by TEE (salted hash).
     pub fn register(
         &mut self,
         owner: AccountId,
         npub: String,
         commitment: String,
         nullifier: String,
-        account_hash: String,
         proof_b64: String,
         public_inputs_b64: String,
     ) -> PromiseOrValue<()> {
@@ -138,7 +128,6 @@ impl NostrIdentityContract {
         vhex(&npub, "npub", 64);
         vhex(&commitment, "commitment", 64);
         vhex(&nullifier, "nullifier", 64);
-        vhex(&account_hash, "account_hash", 64);
 
         let verifier = self.aurora_verifier.clone().unwrap_or_else(|| env::panic_str("No Aurora verifier"));
         let proof = base64::engine::general_purpose::STANDARD.decode(&proof_b64).unwrap_or_else(|_| env::panic_str("Bad proof"));
@@ -155,7 +144,7 @@ impl NostrIdentityContract {
         let key = format!("{}:{}", npub, env::block_timestamp());
         self.pending.insert(&key, &PendingReg {
             owner, npub: npub.clone(), commitment: commitment.clone(),
-            nullifier: nullifier.clone(), account_hash,
+            nullifier: nullifier.clone(),
         });
 
         let aurora: AccountId = AURORA.parse().unwrap();
@@ -190,7 +179,7 @@ impl NostrIdentityContract {
         let id = IdentityInfo {
             npub: p.npub.clone(), commitment: p.commitment.clone(),
             nullifier: p.nullifier.clone(), created_at: env::block_timestamp_ms(),
-            owner: p.owner, account_hash: p.account_hash,
+            owner: p.owner,
         };
         self.identities.insert(&id.npub, &id);
         self.commitments.insert(&id.commitment, &id.npub);
@@ -201,7 +190,7 @@ impl NostrIdentityContract {
 
     pub fn get_identity_by_npub(&self, npub: String) -> Option<IdentityInfo> { self.identities.get(&npub) }
     pub fn is_registered(&self, npub: String) -> bool { self.identities.contains_key(&npub) }
-    pub fn get_total_identities(&self) -> u64 { self.total_identities }
+    pub fn get_total_identities(&self) -> u64 { self.total_idunities }
     pub fn get_tee_authority(&self) -> AccountId { self.tee_authority.clone() }
     pub fn is_aurora_verifier_set(&self) -> bool { self.aurora_verifier.is_some() }
 }
