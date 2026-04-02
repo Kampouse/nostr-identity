@@ -296,10 +296,25 @@ export default function Home() {
           public_key: 'ed25519:mock_public_key_for_dev_mode',
           signature: 'mock_signature_for_dev_mode',
           authRequest: {
-            message: `Generate Nostr identity for ${accountId}`,
+            message: 'Generate Nostr identity',
             nonce: btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')),
             recipient: 'nostr-identity.kampouse.testnet',
           },
+        }
+      }
+
+      // 🔒 Privacy: Sanitize authRequest.message to remove account_id if present
+      if (nep413?.authRequest?.message) {
+        const originalMessage = nep413.authRequest.message
+        // Remove account_id from message (e.g., "Generate Nostr identity for alice.near" -> "Generate Nostr identity")
+        nep413.authRequest.message = originalMessage
+          .replace(/ for [a-zA-Z0-9._-]+(\.(near|testnet))?$/i, '')
+          .replace(/ for [a-zA-Z0-9._-]+$/i, '')
+
+        if (originalMessage !== nep413.authRequest.message) {
+          console.log('🔒 Sanitized authRequest.message:')
+          console.log('  Before:', originalMessage)
+          console.log('  After:', nep413.authRequest.message)
         }
       }
 
@@ -309,7 +324,7 @@ export default function Home() {
       console.log('SENDING TO TEE:')
       console.log('  Account:', accountId)
       console.log('  Nonce (base64):', nonceBase64)
-      console.log('  Message:', nep413.message || `Generate Nostr identity for ${accountId}`)
+      console.log('  Message:', nep413.message || 'Generate Nostr identity')
       console.log('  Original Recipient:', nep413.recipient)
       console.log('  Public key:', nep413.publicKey)
       console.log('  Signature length:', nep413.signature.length)
@@ -323,7 +338,7 @@ export default function Home() {
         public_key: nep413.publicKey,
         signature: nep413.signature,
         authRequest: {
-          message: nep413.message || `Generate Nostr identity for ${accountId}`,
+          message: nep413.message || 'Generate Nostr identity',
           nonce: nonceBase64,
           recipient: 'nostr-identity.kampouse.testnet',
         },
@@ -419,7 +434,7 @@ export default function Home() {
           public_key: nep413.public_key || nep413.publicKey,
           signature: nep413.signature,
           authRequest: {
-            message: nep413.message || `Generate Nostr identity for ${accountId}`,
+            message: nep413.message || 'Generate Nostr identity',
             nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce,
             recipient: 'nostr-identity.kampouse.testnet',
           },
