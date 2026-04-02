@@ -26,20 +26,17 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
     if (!pairingInput) throw new Error('Missing pairing input')
 
     const args = JSON.stringify({
-      owner: RELAYER_ACCOUNT_ID,
       npub,
       commitment,
       nullifier,
       pairing_input: pairingInput,
     })
 
-    // Use near CLI to submit — simplest, no library issues
     const result = execSync(
       `near call ${CONTRACT_ID} register '${args}' --accountId ${RELAYER_ACCOUNT_ID} --networkId testnet --gas 50000000000000 2>&1`,
       { encoding: 'utf-8', timeout: 30000 }
     )
 
-    // Parse transaction hash from output
     const hashMatch = result.match(/Transaction Id\s+(\w+)/)
     const txHash = hashMatch ? hashMatch[1] : ''
 

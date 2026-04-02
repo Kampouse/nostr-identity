@@ -144,7 +144,48 @@ export default function Home() {
       const zkp = await initZKP()
       const keypair = generateNostrKeypair()
 
-      // Step 1: Generate ZKP proof in browser (keys never leave browser)
+      // Step 1: Get or create a passkey — proves uniqueness via biometric/device auth
+      // Try to use existing passkey first (get), create new one only if none exists
+      const passkeyChallenge = new Uint8Array(32)
+      crypto.getRandomValues(passkeyChallenge)
+      
+      let credential: PublicKeyCredential
+      let isExistingPasskey = false
+      
+      try {
+        // Try to find existing passkey on this device
+        credential = await navigator.credentials.get({
+          publicKey: {
+            challenge: passkeyChallenge,
+            rpId: window.location.hostname,
+            userVerification: 'required',
+            timeout: 60000,
+          },
+        }) as PublicKeyCredential
+        isExistingPasskey = true
+      } catch {
+        // No existing passkey — create one
+        credential = await navigator.credentials.create({
+          publicKey: {
+            challenge: passkeyChallenge,
+            rp: { name: 'Nostr Identity', id: window.location.hostname },
+            user: {
+              id: new TextEncoder().encode(accountId).slice(0, 64),
+              name: accountId,
+              displayName: accountId,
+            },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+            authenticatorSelection: {
+              authenticatorAttachment: 'platform',
+              userVerification: 'required',
+              residentKey: 'required',
+            },
+            timeout: 60000,
+          },
+        } as any) as PublicKeyCredential
+      }
+
+      // Step 2: Generate ZKP proof in browser (keys never leave browser)
       const zkpNonce = zkp.generate_nonce()
       const proofResult = zkp.generate_ownership_proof_with_nsec(
         accountId,
@@ -168,12 +209,18 @@ export default function Home() {
         throw new Error('Failed to generate pairing input')
       }
 
-      // Step 3: Send to relayer — relayer submits tx on-chain so user's NEAR account
+      // Step 3: Compute privacy-preserving nullifier from passkey credential ID
+      // SHA256(credentialId) — deterministic per device, prevents double registration
+      // Nobody can link nullifier to account — credential ID is random and never sent on-chain
+      const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
+      const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
+
+      // Step 4: Send to relayer — relayer submits tx on-chain so user's NEAR account
       // is NOT visible in the transaction. Privacy preserved.
       const data = await submitToRelayer({
         npub: keypair.publicKeyHex,
         commitment: proofResult.commitment,
-        nullifier: proofResult.nullifier,
+        nullifier,
         pairingInput,
       })
 
@@ -276,7 +323,7 @@ export default function Home() {
                     {
                       step: '3',
                       title: 'Prove & register',
-                      desc: 'A zero-knowledge proof is verified on-chain via native pairing check. No TEE, no trust assumptions — pure math.',
+                      desc: 'Passkey + zero-knowledge proof verified on-chain. One identity per device — no trust required.',
                     },
                   ].map((item) => (
                     <div

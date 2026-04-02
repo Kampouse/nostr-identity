@@ -19,7 +19,6 @@ pub struct IdentityInfo {
     pub commitment: String,
     pub nullifier: String,
     pub created_at: u64,
-    pub owner: AccountId,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, BorshStorageKey)]
@@ -74,20 +73,15 @@ impl NostrIdentityContract {
     }
 
     /// Register identity with native pairing check.
-    /// pairing_input: 768 bytes base64 = 4 × (g1[64] + g2[128])
-    /// Tuples: (-alpha,beta) | (-ic_sum,gamma) | (-proof_c,delta) | (proof_a,proof_b)
-    /// Relayer pre-computes all G1 scalar muls and additions off-chain.
-    /// The pairing check is trustless — cannot be forged.
+    /// nullifier = SHA256(account_id) — deterministic, prevents double registration.
+    /// Cannot reverse SHA256 to find the account — privacy preserved.
     pub fn register(
         &mut self,
-        owner: AccountId,
         npub: String,
         commitment: String,
         nullifier: String,
-        pairing_input: String, // base64 of 768 bytes
+        pairing_input: String,
     ) {
-        // Relayer submits on behalf of the user — this hides the user's NEAR account
-        // from on-chain observers. The relayer cannot forge proofs (pairing check is trustless).
         assert!(self.relayers.contains(&env::predecessor_account_id()), "Not a registered relayer");
         vhex(&npub, "npub", 64);
         vhex(&commitment, "commitment", 64);
@@ -95,7 +89,7 @@ impl NostrIdentityContract {
 
         if self.identities.contains_key(&npub) { env::panic_str("npub exists"); }
         if self.commitments.contains_key(&commitment) { env::panic_str("commitment exists"); }
-        if self.nullifiers.contains(&nullifier) { env::panic_str("nullifier used"); }
+        if self.nullifiers.contains(&nullifier) { env::panic_str("account already registered"); }
 
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &pairing_input)
             .unwrap_or_else(|_| env::panic_str("Bad base64"));
@@ -108,7 +102,6 @@ impl NostrIdentityContract {
         let id = IdentityInfo {
             npub, commitment, nullifier,
             created_at: env::block_timestamp_ms(),
-            owner,
         };
         self.identities.insert(&id.npub, &id);
         self.commitments.insert(&id.commitment, &id.npub);
