@@ -26,7 +26,7 @@ fn main() {
             let (private_key, public_key, account_id) = &keys[key_index % keys.len()];
             let message = args.get(3).map(|s| s.as_str()).unwrap_or("Verify NEAR account ownership for Nostr identity");
             let nonce = args.get(4).map(|s| s.as_str()).unwrap_or("test-nonce-12345");
-            let recipient = "nostr-identity.near";
+            let recipient = "nostr-identity.kampouse.testnet";
 
             // Parse private key
             let key_str = private_key.strip_prefix("ed25519:").unwrap();

@@ -16,6 +16,8 @@ pub struct IdentityInfo {
     pub npub: String,
     pub commitment: String,
     pub nullifier: String,
+    pub account_hash: String,
+    pub proof_b64: String,
     pub created_at: u64,
 }
 
@@ -59,12 +61,14 @@ impl NostrIdentityContract {
     }
 
     /// Register a new Nostr identity (TEE authority only).
-    /// No account_hash stored — on-chain data has zero link to NEAR accounts.
+    /// Stores npub, commitment, nullifier, account_hash, and ZKP proof.
     pub fn register(
         &mut self,
         npub: String,
         commitment: String,
         nullifier: String,
+        account_hash: String,
+        proof_b64: String,
     ) -> IdentityInfo {
         let caller = env::predecessor_account_id();
         if caller != self.tee_authority {
@@ -77,6 +81,7 @@ impl NostrIdentityContract {
         Self::validate_hex64(&npub, "npub");
         Self::validate_hex64(&commitment, "commitment");
         Self::validate_hex64(&nullifier, "nullifier");
+        Self::validate_hex64(&account_hash, "account_hash");
 
         if self.identities.contains_key(&npub) {
             env::panic_str("This Nostr public key is already registered");
@@ -92,6 +97,8 @@ impl NostrIdentityContract {
             npub: npub.clone(),
             commitment: commitment.clone(),
             nullifier: nullifier.clone(),
+            account_hash,
+            proof_b64,
             created_at: env::block_timestamp_ms(),
         };
 

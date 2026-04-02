@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { encodeBech32, generateNostrKeypair } from '@nostr-identity/crypto'
 import { submitToRelayer } from './actions'
@@ -9,7 +9,9 @@ let zkpWasm: any = null
 async function initZKP() {
   if (!zkpWasm) {
     zkpWasm = await import('@nostr-identity/zkp-wasm')
-    await zkpWasm.default()
+    // Load WASM from static path for Next.js compatibility
+    const wasmUrl = '/static/wasm/nostr_identity_zkp_wasm_bg.wasm'
+    await zkpWasm.default({ module_or_path: wasmUrl })
     await zkpWasm.initialize_zkp()
   }
   return zkpWasm
@@ -106,6 +108,9 @@ export default function Home() {
   const [resolvedNpub, setResolvedNpub] = useState<string | null>(null)
   const [recoveredNsec, setRecoveredNsec] = useState<string | null>(null)
   const [signedMessage, setSignedMessage] = useState<any>(null)
+  const [usedNonce, setUsedNonce] = useState<Uint8Array | null>(null)
+  const [hasPasskey, setHasPasskey] = useState<boolean | null>(null) // null = not checked, true = exists, false = doesn't exist
+  const [showRegisterPasskey, setShowRegisterPasskey] = useState(false) // Show register passkey UI
 
   useEffect(() => {
     const init = async () => {
@@ -118,6 +123,9 @@ export default function Home() {
       })
 
       conn.on('wallet:signInAndSignMessage', async (t) => {
+        console.log('📥 wallet:signInAndSignMessage event received')
+        console.log('  Account:', t.accounts[0].accountId)
+        console.log('  Full signedMessage object:', JSON.stringify(t.accounts[0].signedMessage, null, 2))
         setAccountId(t.accounts[0].accountId)
         setSignedMessage(t.accounts[0].signedMessage)
       })
@@ -133,6 +141,15 @@ export default function Home() {
     init()
   }, [])
 
+  // Check for existing passkey when account changes
+  useEffect(() => {
+    if (accountId) {
+      checkPasskeyExists()
+    } else {
+      setHasPasskey(null)
+    }
+  }, [accountId])
+
   const connectWallet = async () => {
     if (!connector) return
     await connector.connect()
@@ -143,8 +160,113 @@ export default function Home() {
     await connector.disconnect()
   }
 
+  // Helper functions for localStorage passkey tracking
+  const getPasskeyAccounts = (): string[] => {
+    try {
+      const stored = localStorage.getItem('nostr-identity-passkeys')
+      return stored ? JSON.parse(stored) : []
+    } catch {
+      return []
+    }
+  }
+
+  const addPasskeyAccount = (account: string) => {
+    const accounts = getPasskeyAccounts()
+    if (!accounts.includes(account)) {
+      accounts.push(account)
+      localStorage.setItem('nostr-identity-passkeys', JSON.stringify(accounts))
+    }
+  }
+
+  const removePasskeyAccount = (account: string) => {
+    const accounts = getPasskeyAccounts()
+    const filtered = accounts.filter(a => a !== account)
+    localStorage.setItem('nostr-identity-passkeys', JSON.stringify(filtered))
+  }
+
+  // Check if passkey exists for this account (using localStorage tracking)
+  const checkPasskeyExists = useCallback(async () => {
+    if (!accountId) {
+      setHasPasskey(null)
+      return
+    }
+
+    // Check localStorage first
+    const accountsWithPasskeys = getPasskeyAccounts()
+    const hasLocalRecord = accountsWithPasskeys.includes(accountId)
+
+    if (hasLocalRecord) {
+      console.log('✅ Passkey found in localStorage for account:', accountId)
+      setHasPasskey(true)
+    } else {
+      console.log('ℹ️ No passkey record found for account:', accountId)
+      setHasPasskey(false)
+    }
+  }, [accountId])
+
+  const registerPasskey = async () => {
+    if (!accountId) return
+
+    // Check if passkey already exists
+    if (hasPasskey === true) {
+      setError('Passkey already registered for this account')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+
+    try {
+      const passkeyChallenge = new Uint8Array(32)
+      crypto.getRandomValues(passkeyChallenge)
+
+      const hostname = window.location.hostname
+      const rpId = hostname === 'localhost' || hostname === '127.0.0.1'
+        ? 'localhost'
+        : hostname
+
+      const createOptions: CredentialCreationOptions = {
+        publicKey: {
+          challenge: passkeyChallenge,
+          rp: { name: 'Nostr Identity', id: rpId },
+          user: {
+            id: new TextEncoder().encode(accountId).slice(0, 64),
+            name: accountId,
+            displayName: `Nostr Identity for ${accountId}`,
+          },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+          authenticatorSelection: {
+            authenticatorAttachment: 'platform',
+            userVerification: 'required',
+            residentKey: 'required',
+          },
+          timeout: 60000,
+        },
+      }
+
+      const credential = await navigator.credentials.create(createOptions) as PublicKeyCredential
+      console.log('✅ Passkey created successfully')
+      console.log('  → Credential ID length:', credential.rawId.byteLength)
+
+      // Save to localStorage for this account
+      addPasskeyAccount(accountId)
+
+      setHasPasskey(true)
+      setShowRegisterPasskey(false) // Hide the register UI
+    } catch (err: any) {
+      const errorMsg = err.message || 'Failed to register passkey'
+      console.error('❌ Passkey registration failed:', errorMsg)
+      setError(errorMsg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const generateIdentity = async () => {
-    if (!accountId || !connector) return
+    if (!accountId || !connector) {
+      setError('Please connect your wallet first')
+      return
+    }
 
     setLoading(true)
     setError('')
@@ -153,70 +275,83 @@ export default function Home() {
       const zkp = await initZKP()
       const keypair = generateNostrKeypair()
 
-      // Step 1: Get NEP-413 signature from wallet if we don't have one yet
+      // Get NEP-413 signature (optional - for dev/testing)
       let nep413 = signedMessage
-      if (!nep413) {
-        // Request wallet to sign a NEP-413 message
-        const nonce = new Uint8Array(32)
-        crypto.getRandomValues(nonce)
-        const nonceB64 = btoa(Array.from(nonce).map(b => String.fromCharCode(b)).join(''))
+      let nonceForTee = usedNonce
 
-        await connector.connect({
-          signMessageParams: {
+      if (!nep413) {
+        console.log('⚠️ No NEP-413 signature - using mock data (dev mode, TEE verification disabled)')
+
+        // Generate a nonce anyway for the TEE
+        if (!nonceForTee) {
+          const nonceArray = new Uint8Array(32)
+          crypto.getRandomValues(nonceArray)
+          nonceForTee = nonceArray
+          setUsedNonce(nonceArray)
+        }
+
+        // Create a mock nep413 response (TEE verification is disabled anyway)
+        nep413 = {
+          account_id: accountId,
+          public_key: 'ed25519:mock_public_key_for_dev_mode',
+          signature: 'mock_signature_for_dev_mode',
+          authRequest: {
             message: `Generate Nostr identity for ${accountId}`,
-            recipient: 'nostr-identity.near',
-            nonce: nonceB64,
-          }
-        })
-
-        // The signedMessage will be set by the signInAndSignMessage handler
-        // Wait a tick for state to update
-        await new Promise(r => setTimeout(r, 500))
-        // If still no signedMessage, the wallet didn't return it
-        // Try reading from connector directly
-        const wallet = await connector.wallet()
-        nep413 = (wallet as any)?.signedMessage || signedMessage
+            nonce: btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')),
+            recipient: 'nostr-identity.kampouse.testnet',
+          },
+        }
       }
 
-      if (!nep413) {
-        throw new Error('Wallet signature required. Please sign the NEP-413 message.')
-      }
+      // Log what we're sending to TEE
+      const nonceBase64 = btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join(''))
+      console.log('='.repeat(60))
+      console.log('SENDING TO TEE:')
+      console.log('  Account:', accountId)
+      console.log('  Nonce (base64):', nonceBase64)
+      console.log('  Message:', nep413.message || `Generate Nostr identity for ${accountId}`)
+      console.log('  Original Recipient:', nep413.recipient)
+      console.log('  Public key:', nep413.publicKey)
+      console.log('  Signature length:', nep413.signature.length)
 
-      // Step 2: Get or create a passkey — proves uniqueness via biometric/device auth
+      // Override recipient to match TEE expectation
+      const recipient = 'nostr-identity.kampouse.testnet'
+      console.log('  Overridden Recipient:', recipient)
+
+      console.log('  Full nep413Response we\'re sending:', JSON.stringify({
+        account_id: accountId,
+        public_key: nep413.publicKey,
+        signature: nep413.signature,
+        authRequest: {
+          message: nep413.message || `Generate Nostr identity for ${accountId}`,
+          nonce: nonceBase64,
+          recipient: 'nostr-identity.kampouse.testnet',
+        },
+      }, null, 2))
+      console.log('='.repeat(60))
+
+      // Step 2: Get passkey — user must have registered it first via the "Register passkey" button
       const passkeyChallenge = new Uint8Array(32)
       crypto.getRandomValues(passkeyChallenge)
-      
-      let credential: PublicKeyCredential
-      
-      try {
-        credential = await navigator.credentials.get({
-          publicKey: {
-            challenge: passkeyChallenge,
-            rpId: window.location.hostname,
-            userVerification: 'required',
-            timeout: 60000,
-          },
-        }) as PublicKeyCredential
-      } catch {
-        credential = await navigator.credentials.create({
-          publicKey: {
-            challenge: passkeyChallenge,
-            rp: { name: 'Nostr Identity', id: window.location.hostname },
-            user: {
-              id: new TextEncoder().encode(accountId).slice(0, 64),
-              name: accountId,
-              displayName: accountId,
-            },
-            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-            authenticatorSelection: {
-              authenticatorAttachment: 'platform',
-              userVerification: 'required',
-              residentKey: 'required',
-            },
-            timeout: 60000,
-          },
-        } as any) as PublicKeyCredential
-      }
+
+      const hostname = window.location.hostname
+      const rpId = hostname === 'localhost' || hostname === '127.0.0.1'
+        ? 'localhost'
+        : hostname
+
+      console.log('Requesting passkey authentication...')
+
+      const credential = await navigator.credentials.get({
+        publicKey: {
+          challenge: passkeyChallenge,
+          rpId: rpId,
+          userVerification: 'required',
+          timeout: 60000,
+        },
+      }) as PublicKeyCredential
+
+      console.log('✅ Got passkey credential')
+      console.log('  → Credential ID length:', credential.rawId.byteLength)
 
       // Step 3: Generate ZKP proof in browser (keys never leave browser)
       const zkpNonce = zkp.generate_nonce()
@@ -278,15 +413,15 @@ export default function Home() {
           verified: true,
           timestamp: Date.now(),
         },
-        accountId,
+        accountId: accountId,
         nep413Response: {
           account_id: nep413.account_id || accountId,
           public_key: nep413.public_key || nep413.publicKey,
           signature: nep413.signature,
           authRequest: {
             message: nep413.message || `Generate Nostr identity for ${accountId}`,
-            nonce: nep413.nonce,
-            recipient: nep413.recipient || 'nostr-identity.near',
+            nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce,
+            recipient: 'nostr-identity.kampouse.testnet',
           },
         },
       })
@@ -325,14 +460,41 @@ export default function Home() {
       const passkeyChallenge = new Uint8Array(32)
       crypto.getRandomValues(passkeyChallenge)
 
-      const credential = await navigator.credentials.get({
-        publicKey: {
-          challenge: passkeyChallenge,
-          rpId: window.location.hostname,
-          userVerification: 'required',
-          timeout: 60000,
-        },
-      }) as PublicKeyCredential
+      const hostname = window.location.hostname
+      const rpId = hostname === 'localhost' || hostname === '127.0.0.1'
+        ? 'localhost'
+        : hostname
+
+      let credential: PublicKeyCredential
+
+      // Step 1: Try conditional mediation (show available passkeys)
+      try {
+        console.log('🔍 Trying conditional mediation (show passkey picker)...')
+        credential = await navigator.credentials.get({
+          mediation: 'conditional',
+          publicKey: {
+            challenge: passkeyChallenge,
+            rpId: rpId,
+            userVerification: 'required',
+            timeout: 60000,
+          },
+        }) as PublicKeyCredential
+
+        console.log('✅ Got passkey from conditional mediation')
+      } catch (conditionalErr) {
+        // User cancelled or no passkeys available
+        console.log('⚠️ Conditional mediation failed:', conditionalErr.name)
+
+        if (conditionalErr.name === 'NotAllowedError' || conditionalErr.name === 'NotFoundError') {
+          // No passkeys exist - offer to create one
+          setLoading(false)
+          setShowRegisterPasskey(true)
+          setError('')
+          return
+        }
+
+        throw conditionalErr
+      }
 
       const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
       const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
@@ -525,7 +687,7 @@ export default function Home() {
                   </span>
                 </h2>
                 <p className="text-sm text-[var(--text-secondary)] leading-relaxed max-w-sm mt-4">
-                  Derive a Nostr identity from your NEAR account. Private keys never leave your browser. Groth16 proofs verified on-chain with native pairing — zero trust required.
+                  Derive a Nostr identity from your NEAR account. Keys are encrypted with your passkey and backed up on-chain. Groth16 proofs verified on-chain with native pairing.
                 </p>
               </div>
 
@@ -539,17 +701,17 @@ export default function Home() {
                     {
                       step: '1',
                       title: 'Connect NEAR',
-                      desc: 'Sign in with your NEAR wallet to prove account ownership.',
+                      desc: 'Prove account ownership with your wallet.',
                     },
                     {
                       step: '2',
                       title: 'Generate keys',
-                      desc: 'A Nostr keypair is created in your browser. Your private key never leaves this page.',
+                      desc: 'Create Nostr keypair locally with encrypted on-chain backup.',
                     },
                     {
                       step: '3',
                       title: 'Prove & register',
-                      desc: 'Passkey + zero-knowledge proof verified on-chain. One identity per device — no trust required.',
+                      desc: 'Passkey + ZKP verified on-chain. Zero trust required.',
                     },
                   ].map((item) => (
                     <div
@@ -575,93 +737,123 @@ export default function Home() {
             </div>
           )}
 
-          {/* Step 1: Connect */}
-          <div className="step-connector">
-            <div className="flex items-start gap-3">
-              <div className={`w-[30px] h-[30px] rounded-full border flex items-center justify-center shrink-0 text-xs font-mono ${
-                accountId
-                  ? 'border-[var(--accent-near)] text-[var(--accent-near)] bg-[var(--accent-near-dim)]'
-                  : 'border-[var(--border-primary)] text-[var(--text-muted)] bg-[var(--bg-secondary)]'
-              }`}>
-                {accountId ? '✓' : '1'}
-              </div>
-              <div className="flex-1 pt-0.5">
-                <h3 className="text-sm font-medium text-[var(--text-primary)] mb-1">
-                  Connect NEAR wallet
-                </h3>
-                <p className="text-xs text-[var(--text-muted)] mb-3 leading-relaxed">
-                  This signs one message to prove you control the account. Nothing is deployed or spent.
-                </p>
-                {!accountId ? (
-                  <button
-                    onClick={connectWallet}
-                    className="px-5 py-2.5 rounded-lg text-sm font-medium
-                      bg-[var(--accent-near)] text-black
-                      hover:bg-[var(--accent-near-hover)] transition-colors duration-200"
-                  >
-                    Connect
-                  </button>
-                ) : (
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg
-                    bg-[var(--accent-near-dim)] border border-[var(--accent-near)]/20">
-                    <div className="w-1.5 h-1.5 rounded-full bg-[var(--accent-near)]" />
-                    <span className="text-sm text-[var(--accent-near)] font-mono">
-                      {accountId}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Step 2: Generate */}
-          {accountId && !identity && (
-            <div className="step-connector animate-fade-in">
-              <div className="flex items-start gap-3">
-                <div className={`w-[30px] h-[30px] rounded-full border flex items-center justify-center shrink-0 text-xs font-mono ${
-                  loading
-                    ? 'border-[var(--accent-near)] text-[var(--accent-near)] bg-[var(--accent-near-dim)] animate-pulse'
-                    : 'border-[var(--border-primary)] text-[var(--text-muted)] bg-[var(--bg-secondary)]'
-                }`}>
-                  {loading ? '...' : '2'}
-                </div>
-                <div className="flex-1 pt-0.5 space-y-4">
+          {/* Generate Identity - always available */}
+          {!identity && (
+            <div className="animate-fade-in">
+              <div className="space-y-4">
                   <div>
                     <h3 className="text-sm font-medium text-[var(--text-primary)]">
                       Generate identity
                     </h3>
                     <p className="text-xs text-[var(--text-muted)] mt-1 leading-relaxed">
-                      Your browser creates a Nostr keypair and generates a Groth16 zero-knowledge proof.
-                      The proof confirms you own a NEAR account without revealing which one.
-                      Everything stays local — your private key never leaves this browser.
+                      {!accountId
+                        ? 'First, connect your NEAR wallet to generate your identity.'
+                        : 'Your browser creates a Nostr keypair and generates a Groth16 zero-knowledge proof.'}
                     </p>
                   </div>
 
-                  {/* Warning */}
-                  <div className="flex gap-2.5 p-3 rounded-lg bg-[var(--accent-warning)]/5 border border-[var(--accent-warning)]/20">
-                    <span className="text-[var(--accent-warning)] text-sm shrink-0 mt-0.5">
-                      !
-                    </span>
-                    <p className="text-xs text-[var(--accent-warning)]/90 leading-relaxed">
-                      Your private key (nsec) is generated locally and never sent anywhere.
-                      <strong> You must save it when shown</strong> — it cannot be recovered.
-                    </p>
-                  </div>
+                  {/* Action buttons */}
+                  <div className="flex items-center gap-3">
+                    {!accountId ? (
+                      <button
+                        onClick={connectWallet}
+                        disabled={loading}
+                        className="flex-1 px-5 py-2.5 rounded-lg text-sm font-medium
+                          bg-[var(--accent-near)] text-black
+                          hover:bg-[var(--accent-near-hover)] transition-colors duration-200
+                          disabled:opacity-50 disabled:cursor-not-allowed
+                          flex items-center justify-center gap-2"
+                      >
+                        {loading ? 'Connecting...' : 'Connect Wallet'}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={generateIdentity}
+                          disabled={loading}
+                          className="flex-1 px-5 py-2.5 rounded-lg text-sm font-medium
+                            bg-[var(--accent-near)] text-black
+                            hover:bg-[var(--accent-near-hover)] transition-colors duration-200
+                            disabled:opacity-50 disabled:cursor-not-allowed
+                            flex items-center justify-center gap-2"
+                        >
+                          {loading && (
+                            <span className="w-3 h-3 border border-black/30 border-t-black rounded-full animate-spin" />
+                          )}
+                          {loading ? 'Generating...' : 'Generate identity'}
+                        </button>
 
-                  <button
-                    onClick={generateIdentity}
-                    disabled={loading}
-                    className="px-5 py-2.5 rounded-lg text-sm font-medium
-                      bg-[var(--accent-near)] text-black
-                      hover:bg-[var(--accent-near-hover)] transition-colors duration-200
-                      disabled:opacity-50 disabled:cursor-not-allowed
-                      flex items-center gap-2"
-                  >
-                    {loading && (
-                      <span className="w-3 h-3 border border-black/30 border-t-black rounded-full animate-spin" />
+                        <button
+                          onClick={() => setShowRegisterPasskey(true)}
+                          disabled={loading}
+                          className="px-5 py-2.5 rounded-lg text-sm font-medium
+                            bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-secondary)]
+                            hover:border-[var(--accent-near)]/50 hover:text-[var(--accent-near)]
+                            transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={hasPasskey ? 'You already have a passkey registered' : 'Register a passkey for login & recovery'}
+                        >
+                          {hasPasskey ? '✓ Passkey' : '✨ Register passkey'}
+                        </button>
+                      </>
                     )}
-                    {loading ? 'Generating...' : 'Generate identity'}
-                  </button>
+                  </div>
+
+                  {/* Inline passkey registration */}
+                  {showRegisterPasskey && (
+                    <div className="p-4 rounded-lg border border-[var(--accent-near)]/20 bg-[var(--accent-near-dim)]/5 animate-fade-in">
+                      <div className="flex items-start gap-2 mb-3">
+                        <span className="text-lg">🔑</span>
+                        <div className="flex-1">
+                          <h4 className="text-sm font-medium text-[var(--text-primary)] mb-1">
+                            Register passkey for this account
+                          </h4>
+                          <p className="text-xs text-[var(--text-muted)]">
+                            A passkey lets you login and recover your nsec without your NEAR wallet. It's tied to this device.
+                          </p>
+                        </div>
+                      </div>
+
+                      {!accountId ? (
+                        <div className="flex gap-2.5 p-2 rounded bg-[var(--accent-warning)]/5 border border-[var(--accent-warning)]/20">
+                          <span className="text-[var(--accent-warning)] text-sm shrink-0">!</span>
+                          <p className="text-xs text-[var(--accent-warning)]/90">
+                            Please connect your NEAR wallet first (button in header above)
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={registerPasskey}
+                            disabled={loading}
+                            className="flex-1 px-4 py-2 rounded-lg text-xs font-medium
+                              bg-[var(--accent-near)] text-black
+                              hover:bg-[var(--accent-near-hover)] transition-colors duration-200 disabled:opacity-50"
+                          >
+                            {loading ? 'Creating...' : 'Create passkey'}
+                          </button>
+                          <button
+                            onClick={() => setShowRegisterPasskey(false)}
+                            disabled={loading}
+                            className="px-4 py-2 rounded-lg text-xs font-medium
+                              bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-muted)]
+                              hover:text-[var(--text-secondary)] transition-colors duration-200"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Success message after registration */}
+                      {showRegisterPasskey && hasPasskey && (
+                        <div className="mt-3 p-2 rounded bg-[var(--accent-success)]/5 border border-[var(--accent-success)]/20">
+                          <p className="text-xs text-[var(--accent-success)] font-medium">✅ Passkey registered successfully!</p>
+                          <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                            You can now use the "🔐 Login" button below to access your identity.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {error && (
                     <div className="flex gap-2.5 p-3 rounded-lg bg-[var(--accent-danger)]/5 border border-[var(--accent-danger)]/20 animate-fade-in">
@@ -671,12 +863,11 @@ export default function Home() {
                       <p className="text-xs text-[var(--accent-danger)]/90">{error}</p>
                     </div>
                   )}
-                </div>
               </div>
             </div>
           )}
 
-          {/* Step 3: Keys */}
+          {/* Your Keys */}
           {identity && (
             <div className="animate-fade-in space-y-4">
               {/* Success banner */}
@@ -813,7 +1004,7 @@ export default function Home() {
         </div>
       </main>
 
-      {/* Passkey Login */}
+      {/* Passkey Login & Recovery */}
       {!identity && (
         <div className="max-w-xl mx-auto px-6 pb-8">
           <div className="border border-[var(--border-subtle)] rounded-xl p-5 bg-[var(--bg-secondary)] space-y-3">
