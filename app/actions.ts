@@ -76,6 +76,7 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
       },
       writer_contract_id: CONTRACT_ID,
       deadline: Math.floor(Date.now() / 1000) + 300,
+      nullifier: params.nullifier,
     }
 
     // Add encrypted_nsec if provided

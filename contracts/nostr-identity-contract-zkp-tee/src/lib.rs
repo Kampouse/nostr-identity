@@ -796,6 +796,8 @@ pub enum Action {
         writer_contract_id: String,
         /// Transaction deadline
         deadline: u64,
+        /// Passkey-derived nullifier (SHA256 of credentialId) for dedup
+        nullifier: String,
         /// Optional encrypted nsec backup (AES-256-GCM encrypted with SHA256(passkey))
         #[serde(skip_serializing_if = "Option::is_none")]
         encrypted_nsec: Option<String>,
@@ -860,6 +862,7 @@ pub fn handle_action(action: Action) -> ActionResult {
             nep413_response,
             writer_contract_id,
             deadline,
+            nullifier,
             encrypted_nsec,
             signing_key,
         } => {
@@ -870,6 +873,7 @@ pub fn handle_action(action: Action) -> ActionResult {
                 nep413_response,
                 writer_contract_id,
                 deadline,
+                nullifier,
                 encrypted_nsec,
                 signing_key,
             )
@@ -1532,6 +1536,7 @@ fn handle_register_with_zkp(
     nep413_response: Nep413AuthResponse,
     writer_contract_id: String,
     deadline: u64,
+    nullifier: String,
     encrypted_nsec: Option<String>,
     signing_key: Option<String>,
 ) -> ActionResult {
@@ -1544,7 +1549,7 @@ fn handle_register_with_zkp(
         };
     }
 
-    // 2. Extract commitment and nullifier from ZKP public inputs
+    // 2. Extract commitment from ZKP public inputs
     if zkp_proof.public_inputs.len() < 2 {
         return ActionResult {
             success: false,
@@ -1554,7 +1559,8 @@ fn handle_register_with_zkp(
     }
 
     let commitment = zkp_proof.public_inputs[0].clone();
-    let nullifier = zkp_proof.public_inputs[1].clone();
+    // Use the client-provided passkey-derived nullifier (deterministic per passkey)
+    // NOT the ZKP-derived one (changes every proof generation)
 
     // 3. Verify ZKP — NEVER trust client's "verified" flag
     // TEE must cryptographically verify the Groth16 proof
