@@ -1,8 +1,34 @@
 'use server'
-import { execSync } from 'child_process'
+
+// OutLayer HTTPS API: POST https://api.outlayer.fastnear.com/call/{owner}/{project}
+// TEE WASM reads JSON from stdin, returns JSON on stdout
+const OUTLAYER_API = 'https://api.outlayer.fastnear.com/call'
+const OUTLAYER_PROJECT = process.env.OUTLAYER_PROJECT_ID || 'kampouse.near/nostr-identity-tee'
+const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
+
+// Secrets ref for TEE to access encrypted NEAR signing key
+const SECRETS_PROFILE = process.env.OUTLAYER_SECRETS_PROFILE || 'default'
+const SECRETS_ACCOUNT = process.env.OUTLAYER_SECRETS_ACCOUNT_ID || ''
 
 const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.kampouse.testnet'
-const RELAYER_ACCOUNT_ID = process.env.RELAYER_ACCOUNT_ID || 'kampouse.testnet'
+
+interface ZKPProof {
+  proof: string
+  public_inputs: string[]
+  verified: boolean
+  timestamp: number
+}
+
+interface Nep413Auth {
+  account_id: string
+  public_key: string
+  signature: string
+  authRequest: {
+    message: string
+    nonce: string
+    recipient: string
+  }
+}
 
 interface RegisterParams {
   npub: string
@@ -10,46 +36,99 @@ interface RegisterParams {
   nullifier: string
   pairingInput: string
   encryptedNsec?: string
+  zkpProof: ZKPProof
+  accountId: string
+  nep413Response: Nep413Auth
 }
 
 export async function submitToRelayer(params: RegisterParams): Promise<{
   success: boolean
   transaction_hash?: string
   created_at?: number
+  npub?: string
   error?: string
 }> {
-  const { npub, commitment, nullifier, pairingInput, encryptedNsec } = params
+  const { npub, zkpProof, accountId, nep413Response } = params
 
   try {
     if (!npub || npub.length !== 64) throw new Error('Invalid npub')
-    if (!commitment || commitment.length !== 64) throw new Error('Invalid commitment')
-    if (!nullifier || nullifier.length !== 64) throw new Error('Invalid nullifier')
-    if (!pairingInput) throw new Error('Missing pairing input')
+    if (!accountId) throw new Error('Missing account_id')
+    if (!zkpProof || !zkpProof.proof) throw new Error('Missing ZKP proof')
+    if (!nep413Response) throw new Error('Missing NEP-413 auth')
+    if (!PAYMENT_KEY) throw new Error('OUTLAYER_PAYMENT_KEY not configured')
 
-    const args = JSON.stringify({
+    // Build the action payload — this becomes stdin JSON for the TEE WASM
+    const teeInput = {
+      action: 'register_with_zkp',
+      zkp_proof: {
+        proof: zkpProof.proof,
+        public_inputs: zkpProof.public_inputs,
+        verified: zkpProof.verified,
+        timestamp: zkpProof.timestamp,
+      },
       npub,
-      commitment,
-      nullifier,
-      pairing_input: pairingInput,
-      encrypted_nsec: encryptedNsec || null,
+      account_id: accountId,
+      nep413_response: {
+        account_id: nep413Response.account_id || accountId,
+        public_key: nep413Response.public_key,
+        signature: nep413Response.signature,
+        authRequest: nep413Response.authRequest,
+      },
+      writer_contract_id: CONTRACT_ID,
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    }
+
+    const url = `${OUTLAYER_API}/${OUTLAYER_PROJECT}`
+
+    console.log('Calling TEE:', url)
+    console.log('Action:', teeInput.action, '| Account:', accountId, '| Npub:', npub.slice(0, 16) + '...')
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Payment-Key': PAYMENT_KEY,
+      },
+      body: JSON.stringify({
+        input: teeInput,
+        ...(SECRETS_ACCOUNT ? {
+          secrets_ref: {
+            profile: SECRETS_PROFILE,
+            account_id: SECRETS_ACCOUNT,
+          }
+        } : {}),
+      }),
     })
 
-    const result = execSync(
-      `near call ${CONTRACT_ID} register '${args}' --accountId ${RELAYER_ACCOUNT_ID} --networkId testnet --gas 50000000000000 2>&1`,
-      { encoding: 'utf-8', timeout: 30000 }
-    )
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(`OutLayer API ${response.status}: ${text.slice(0, 300)}`)
+    }
 
-    const hashMatch = result.match(/Transaction Id\s+(\w+)/)
-    const txHash = hashMatch ? hashMatch[1] : ''
+    const data = await response.json()
+    console.log('OutLayer response:', JSON.stringify(data).slice(0, 400))
+
+    // OutLayer wraps result: { status: "completed", output: "...", ... }
+    if (data.status === 'failed') {
+      throw new Error(data.error || 'TEE execution failed')
+    }
+
+    // The TEE output is in data.output — could be string or object
+    const output = typeof data.output === 'string' ? JSON.parse(data.output) : data.output
+
+    if (!output.success) {
+      throw new Error(output.error || 'TEE registration failed')
+    }
 
     return {
       success: true,
-      transaction_hash: txHash,
-      created_at: Date.now(),
+      transaction_hash: output.transaction_hash,
+      created_at: output.created_at || Date.now(),
+      npub: output.npub || npub,
     }
   } catch (error: any) {
-    const msg = error.stdout || error.message || 'Relayer failed'
-    console.error('Relayer error:', msg)
-    return { success: false, error: msg.slice(0, 200) }
+    const msg = error.message || 'Registration failed'
+    console.error('TEE registration error:', msg)
+    return { success: false, error: msg.slice(0, 300) }
   }
 }

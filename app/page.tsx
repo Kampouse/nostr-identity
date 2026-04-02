@@ -105,6 +105,7 @@ export default function Home() {
   const [showDetails, setShowDetails] = useState(false)
   const [resolvedNpub, setResolvedNpub] = useState<string | null>(null)
   const [recoveredNsec, setRecoveredNsec] = useState<string | null>(null)
+  const [signedMessage, setSignedMessage] = useState<any>(null)
 
   useEffect(() => {
     const init = async () => {
@@ -116,9 +117,15 @@ export default function Home() {
         setAccountId(t.accounts[0].accountId)
       })
 
+      conn.on('wallet:signInAndSignMessage', async (t) => {
+        setAccountId(t.accounts[0].accountId)
+        setSignedMessage(t.accounts[0].signedMessage)
+      })
+
       conn.on('wallet:signOut', async () => {
         setAccountId('')
         setIdentity(null)
+        setSignedMessage(null)
       })
 
       setConnector(conn)
@@ -146,16 +153,42 @@ export default function Home() {
       const zkp = await initZKP()
       const keypair = generateNostrKeypair()
 
-      // Step 1: Get or create a passkey — proves uniqueness via biometric/device auth
-      // Try to use existing passkey first (get), create new one only if none exists
+      // Step 1: Get NEP-413 signature from wallet if we don't have one yet
+      let nep413 = signedMessage
+      if (!nep413) {
+        // Request wallet to sign a NEP-413 message
+        const nonce = new Uint8Array(32)
+        crypto.getRandomValues(nonce)
+        const nonceB64 = btoa(Array.from(nonce).map(b => String.fromCharCode(b)).join(''))
+
+        await connector.connect({
+          signMessageParams: {
+            message: `Generate Nostr identity for ${accountId}`,
+            recipient: 'nostr-identity.near',
+            nonce: nonceB64,
+          }
+        })
+
+        // The signedMessage will be set by the signInAndSignMessage handler
+        // Wait a tick for state to update
+        await new Promise(r => setTimeout(r, 500))
+        // If still no signedMessage, the wallet didn't return it
+        // Try reading from connector directly
+        const wallet = await connector.wallet()
+        nep413 = (wallet as any)?.signedMessage || signedMessage
+      }
+
+      if (!nep413) {
+        throw new Error('Wallet signature required. Please sign the NEP-413 message.')
+      }
+
+      // Step 2: Get or create a passkey — proves uniqueness via biometric/device auth
       const passkeyChallenge = new Uint8Array(32)
       crypto.getRandomValues(passkeyChallenge)
       
       let credential: PublicKeyCredential
-      let isExistingPasskey = false
       
       try {
-        // Try to find existing passkey on this device
         credential = await navigator.credentials.get({
           publicKey: {
             challenge: passkeyChallenge,
@@ -164,9 +197,7 @@ export default function Home() {
             timeout: 60000,
           },
         }) as PublicKeyCredential
-        isExistingPasskey = true
       } catch {
-        // No existing passkey — create one
         credential = await navigator.credentials.create({
           publicKey: {
             challenge: passkeyChallenge,
@@ -187,7 +218,7 @@ export default function Home() {
         } as any) as PublicKeyCredential
       }
 
-      // Step 2: Generate ZKP proof in browser (keys never leave browser)
+      // Step 3: Generate ZKP proof in browser (keys never leave browser)
       const zkpNonce = zkp.generate_nonce()
       const proofResult = zkp.generate_ownership_proof_with_nsec(
         accountId,
@@ -199,8 +230,7 @@ export default function Home() {
         throw new Error('Invalid ZKP proof: missing required fields')
       }
 
-      // Step 2: Generate pairing input for NEAR's native alt_bn128_pairing_check
-      // This converts the Groth16 proof into 768 bytes that the contract verifies on-chain
+      // Step 4: Generate pairing input for NEAR's native alt_bn128_pairing_check
       const pairingInput = zkp.generate_pairing_input(
         proofResult.proof,
         proofResult.commitment_field,
@@ -211,11 +241,11 @@ export default function Home() {
         throw new Error('Failed to generate pairing input')
       }
 
-      // Step 3: Compute privacy-preserving nullifier from passkey credential ID
+      // Step 5: Compute privacy-preserving nullifier from passkey credential ID
       const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
       const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
 
-      // Step 4: Encrypt nsec with AES-GCM for on-chain backup (recoverable with passkey)
+      // Step 6: Encrypt nsec with AES-GCM for on-chain backup (recoverable with passkey)
       const aesKeyMaterial = await crypto.subtle.digest('SHA-256', credential.rawId)
       const aesKey = await crypto.subtle.importKey(
         'raw',
@@ -230,19 +260,35 @@ export default function Home() {
         aesKey,
         new TextEncoder().encode(keypair.privateKeyHex)
       )
-      // Combine iv + ciphertext → base64
       const combined = new Uint8Array(iv.length + new Uint8Array(encrypted).length)
       combined.set(iv)
       combined.set(new Uint8Array(encrypted), iv.length)
       const encryptedNsec = btoa(Array.from(combined).map(b => String.fromCharCode(b)).join(''))
 
-      // Step 5: Send to relayer
+      // Step 7: Send to TEE with NEP-413 + ZKP proof
       const data = await submitToRelayer({
         npub: keypair.publicKeyHex,
         commitment: proofResult.commitment,
         nullifier,
         pairingInput,
         encryptedNsec,
+        zkpProof: {
+          proof: proofResult.proof,
+          public_inputs: proofResult.public_inputs || [proofResult.commitment_field, proofResult.nullifier_field],
+          verified: true,
+          timestamp: Date.now(),
+        },
+        accountId,
+        nep413Response: {
+          account_id: nep413.account_id || accountId,
+          public_key: nep413.public_key || nep413.publicKey,
+          signature: nep413.signature,
+          authRequest: {
+            message: nep413.message || `Generate Nostr identity for ${accountId}`,
+            nonce: nep413.nonce,
+            recipient: nep413.recipient || 'nostr-identity.near',
+          },
+        },
       })
 
       if (!data.success) {
