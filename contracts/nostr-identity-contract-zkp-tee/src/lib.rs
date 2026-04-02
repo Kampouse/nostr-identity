@@ -224,6 +224,9 @@ pub struct ActionResult {
     /// Signed transaction ready to submit (when using RegisterWithZkp)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed_transaction: Option<serde_json::Value>,
+    /// Encrypted nsec backup (AES-256-GCM encrypted with passkey)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_nsec: Option<String>,
 }
 
 // For delegated registration via smart contract
@@ -1661,11 +1664,12 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 10. Return success
+    // 10. Return success with encrypted_nsec confirmation
     ActionResult {
         success: true,
         npub: Some(npub),
-        nsec: None,
+        nsec: None,  // nsec is encrypted, not returned in plain text
+        encrypted_nsec: encrypted_nsec.clone(),  // Return encrypted version for confirmation
         commitment: Some(commitment),
         nullifier: Some(nullifier),
         created_at: Some(created_at),
