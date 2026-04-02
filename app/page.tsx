@@ -103,6 +103,7 @@ export default function Home() {
 
   const [showKey, setShowKey] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
+  const [resolvedNpub, setResolvedNpub] = useState<string | null>(null)
 
   useEffect(() => {
     const init = async () => {
@@ -244,6 +245,69 @@ export default function Home() {
     } catch (err: any) {
       setError(err.message || 'Failed to generate identity')
       console.error(err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loginWithPasskey = async () => {
+    setLoading(true)
+    setError('')
+    setResolvedNpub(null)
+
+    try {
+      const passkeyChallenge = new Uint8Array(32)
+      crypto.getRandomValues(passkeyChallenge)
+
+      const credential = await navigator.credentials.get({
+        publicKey: {
+          challenge: passkeyChallenge,
+          rpId: window.location.hostname,
+          userVerification: 'required',
+          timeout: 60000,
+        },
+      }) as PublicKeyCredential
+
+      const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
+      const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
+
+      // Query contract: resolve nullifier → npub
+      const response = await fetch('https://rpc.testnet.fastnear.com/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'resolve',
+          method: 'query',
+          params: {
+            request_type: 'call_function',
+            account_id: 'nostr-identity.kampouse.testnet',
+            method_name: 'resolve_nullifier',
+            args_base64: btoa(JSON.stringify({ nullifier })),
+            finality: 'final',
+          },
+        }),
+      })
+
+      const data = await response.json()
+      const result = data.result?.result
+      if (!result) throw new Error('Identity not found')
+
+      // Decode the npub from the contract response
+      const npubBytes = new Uint8Array(result)
+      const npubStr = new TextDecoder().decode(npubBytes)
+
+      // The result is borsh-serialized Option<String>, extract the string
+      // Format: [1 (some flag), 8 bytes length, string bytes]
+      if (npubBytes[0] === 0) throw new Error('No identity found for this passkey')
+
+      // Parse borsh Option<String>
+      const len = Number(new DataView(npubBytes.buffer).getBigUint64(1, true))
+      const npub = new TextDecoder().decode(npubBytes.slice(9, 9 + len))
+
+      setResolvedNpub(npub)
+    } catch (err: any) {
+      setError(err.message || 'Passkey login failed')
     } finally {
       setLoading(false)
     }
@@ -586,6 +650,39 @@ export default function Home() {
           )}
         </div>
       </main>
+
+      {/* Passkey Login */}
+      {!identity && (
+        <div className="max-w-xl mx-auto px-6 pb-8">
+          <div className="border border-[var(--border-subtle)] rounded-xl p-5 bg-[var(--bg-secondary)] space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-[var(--text-primary)]">
+                Already have an identity?
+              </h3>
+              <button
+                onClick={loginWithPasskey}
+                disabled={loading}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium
+                  bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-secondary)]
+                  hover:border-[var(--accent-near)]/50 hover:text-[var(--accent-near)]
+                  transition-colors duration-200 disabled:opacity-50"
+              >
+                🔐 Login with passkey
+              </button>
+            </div>
+
+            {resolvedNpub && (
+              <div className="p-3 rounded-lg bg-[var(--accent-success)]/5 border border-[var(--accent-success)]/20 animate-fade-in">
+                <p className="text-xs text-[var(--text-muted)] mb-1">Welcome back</p>
+                <p className="text-sm font-mono text-[var(--text-primary)] break-all">{resolvedNpub}</p>
+                <p className="text-xs text-[var(--text-muted)] mt-2">
+                  npub: <span className="font-mono">{encodeBech32('npub', resolvedNpub)}</span>
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="border-t border-[var(--border-subtle)]">

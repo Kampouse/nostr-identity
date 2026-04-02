@@ -10,6 +10,7 @@ pub struct NostrIdentityContract {
     identities: LookupMap<String, IdentityInfo>,
     commitments: LookupMap<String, String>,
     nullifiers: UnorderedSet<String>,
+    nullifier_to_npub: LookupMap<String, String>,
     total_identities: u64,
 }
 
@@ -27,6 +28,7 @@ enum StorageKey {
     Commitments,
     Nullifiers,
     Relayers,
+    NullifierToNpub,
 }
 
 fn vhex(v: &str, n: &str, l: usize) {
@@ -50,6 +52,7 @@ impl NostrIdentityContract {
             identities: LookupMap::new(StorageKey::Identities),
             commitments: LookupMap::new(StorageKey::Commitments),
             nullifiers: UnorderedSet::new(StorageKey::Nullifiers),
+            nullifier_to_npub: LookupMap::new(StorageKey::NullifierToNpub),
             total_identities: 0,
         }
     }
@@ -73,8 +76,7 @@ impl NostrIdentityContract {
     }
 
     /// Register identity with native pairing check.
-    /// nullifier = SHA256(account_id) — deterministic, prevents double registration.
-    /// Cannot reverse SHA256 to find the account — privacy preserved.
+    /// nullifier = SHA256(passkey_credential_id) — deterministic, prevents double registration.
     pub fn register(
         &mut self,
         npub: String,
@@ -87,9 +89,9 @@ impl NostrIdentityContract {
         vhex(&commitment, "commitment", 64);
         vhex(&nullifier, "nullifier", 64);
 
+        if self.nullifiers.contains(&nullifier) { env::panic_str("account already registered"); }
         if self.identities.contains_key(&npub) { env::panic_str("npub exists"); }
         if self.commitments.contains_key(&commitment) { env::panic_str("commitment exists"); }
-        if self.nullifiers.contains(&nullifier) { env::panic_str("account already registered"); }
 
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &pairing_input)
             .unwrap_or_else(|_| env::panic_str("Bad base64"));
@@ -100,13 +102,20 @@ impl NostrIdentityContract {
         }
 
         let id = IdentityInfo {
-            npub, commitment, nullifier,
+            npub: npub.clone(), commitment, nullifier: nullifier.clone(),
             created_at: env::block_timestamp_ms(),
         };
         self.identities.insert(&id.npub, &id);
         self.commitments.insert(&id.commitment, &id.npub);
         self.nullifiers.insert(&id.nullifier);
+        self.nullifier_to_npub.insert(&nullifier, &npub);
         self.total_identities += 1;
+    }
+
+    /// Resolve npub from nullifier — used for passkey login
+    /// Client: passkey → SHA256(credentialId) → nullifier → this call → npub
+    pub fn resolve_nullifier(&self, nullifier: String) -> Option<String> {
+        self.nullifier_to_npub.get(&nullifier)
     }
 
     pub fn get_identity_by_npub(&self, npub: String) -> Option<IdentityInfo> { self.identities.get(&npub) }
