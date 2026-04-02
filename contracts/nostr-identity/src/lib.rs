@@ -11,13 +11,14 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LookupMap, UnorderedSet};
 use near_sdk::{env, near_bindgen, AccountId, BorshStorageKey, PanicOnDefault};
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Debug)]
 pub struct IdentityInfo {
     pub npub: String,
     pub commitment: String,
     pub nullifier: String,
     pub account_hash: String,
     pub proof_b64: String,
+    pub encrypted_nsec: Option<String>,
     pub created_at: u64,
 }
 
@@ -33,6 +34,7 @@ enum StorageKey {
     Identities,
     Commitments,
     Nullifiers,
+    NullifierToNpub,
 }
 
 #[near_bindgen]
@@ -43,6 +45,7 @@ pub struct NostrIdentityContract {
     identities: LookupMap<String, IdentityInfo>,
     commitments: LookupMap<String, String>,
     nullifiers: UnorderedSet<String>,
+    nullifier_to_npub: LookupMap<String, String>,
     total_identities: u64,
 }
 
@@ -56,12 +59,13 @@ impl NostrIdentityContract {
             identities: LookupMap::new(StorageKey::Identities),
             commitments: LookupMap::new(StorageKey::Commitments),
             nullifiers: UnorderedSet::new(StorageKey::Nullifiers),
+            nullifier_to_npub: LookupMap::new(StorageKey::NullifierToNpub),
             total_identities: 0,
         }
     }
 
     /// Register a new Nostr identity (TEE authority only).
-    /// Stores npub, commitment, nullifier, account_hash, and ZKP proof.
+    /// Stores npub, commitment, nullifier, account_hash, ZKP proof, and optional encrypted_nsec.
     pub fn register(
         &mut self,
         npub: String,
@@ -69,6 +73,7 @@ impl NostrIdentityContract {
         nullifier: String,
         account_hash: String,
         proof_b64: String,
+        encrypted_nsec: Option<String>,
     ) -> IdentityInfo {
         let caller = env::predecessor_account_id();
         if caller != self.tee_authority {
@@ -99,12 +104,14 @@ impl NostrIdentityContract {
             nullifier: nullifier.clone(),
             account_hash,
             proof_b64,
+            encrypted_nsec,
             created_at: env::block_timestamp_ms(),
         };
 
         self.identities.insert(&npub, &identity);
         self.commitments.insert(&commitment, &npub);
         self.nullifiers.insert(&nullifier);
+        self.nullifier_to_npub.insert(&nullifier, &npub);
         self.total_identities += 1;
 
         identity
@@ -180,6 +187,19 @@ impl NostrIdentityContract {
         }
     }
 
+    /// Resolve nullifier to npub (for recovery)
+    pub fn resolve_nullifier(&self, nullifier: String) -> Option<String> {
+        match self.nullifier_to_npub.get(&nullifier) {
+            Some(npub) => Some(npub.clone()),
+            None => None,
+        }
+    }
+
+    /// Get identity by npub (alias for get_identity for recovery flow)
+    pub fn get_identity_by_npub(&self, npub: String) -> Option<IdentityInfo> {
+        self.get_identity(npub)
+    }
+
     fn validate_hex64(value: &str, name: &str) {
         if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
             env::panic_str(&format!(
@@ -223,7 +243,7 @@ mod tests {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
 
-        let id = contract.register(hex64('a'), hex64('b'), hex64('c'));
+        let id = contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
 
         assert_eq!(id.npub, hex64('a'));
         assert_eq!(id.commitment, hex64('b'));
@@ -238,7 +258,7 @@ mod tests {
     fn test_lookup_by_commitment() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
 
         let found = contract.get_by_commitment(hex64('b'));
         assert!(found.is_some());
@@ -249,7 +269,7 @@ mod tests {
     fn test_verify_commitment() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
 
         let result = contract.verify_commitment(hex64('b'));
         assert!(result.registered);
@@ -264,7 +284,7 @@ mod tests {
     fn test_register_unauthorized() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(USER)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
     }
 
     #[test]
@@ -272,8 +292,8 @@ mod tests {
     fn test_double_registration_same_npub() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
-        contract.register(hex64('a'), hex64('e'), hex64('f'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
+        contract.register(hex64('a'), hex64('f'), hex64('g'), hex64('h'), hex64('i'), None);
     }
 
     #[test]
@@ -281,8 +301,8 @@ mod tests {
     fn test_double_registration_same_commitment() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
-        contract.register(hex64('e'), hex64('b'), hex64('f'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
+        contract.register(hex64('f'), hex64('b'), hex64('g'), hex64('h'), hex64('i'), None);
     }
 
     #[test]
@@ -290,8 +310,8 @@ mod tests {
     fn test_double_registration_same_nullifier() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register(hex64('a'), hex64('b'), hex64('c'));
-        contract.register(hex64('e'), hex64('f'), hex64('c'));
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
+        contract.register(hex64('f'), hex64('g'), hex64('c'), hex64('h'), hex64('i'), None);
     }
 
     #[test]
@@ -299,7 +319,7 @@ mod tests {
     fn test_register_invalid_npub() {
         let (mut contract, mut builder) = setup();
         testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
-        contract.register("short".to_string(), hex64('b'), hex64('c'));
+        contract.register("short".to_string(), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
     }
 
     #[test]
@@ -310,9 +330,47 @@ mod tests {
             let c = (b'0' + i) as char;
             let d = (b'1' + i) as char;
             let e = (b'2' + i) as char;
-            contract.register(hex64(c), hex64(d), hex64(e));
+            let f = (b'3' + i) as char;
+            let g = (b'4' + i) as char;
+            contract.register(hex64(c), hex64(d), hex64(e), hex64(f), hex64(g), None);
         }
         assert_eq!(contract.get_total_identities(), 5);
+    }
+
+    #[test]
+    fn test_resolve_nullifier() {
+        let (mut contract, mut builder) = setup();
+        testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
+        contract.register(hex64('a'), hex64('b'), hex64('c'), hex64('d'), hex64('e'), None);
+
+        let npub = contract.resolve_nullifier(hex64('c'));
+        assert_eq!(npub, Some(hex64('a')));
+
+        let not_found = contract.resolve_nullifier(hex64('z'));
+        assert_eq!(not_found, None);
+    }
+
+    #[test]
+    fn test_get_identity_by_npub() {
+        let (mut contract, mut builder) = setup();
+        testing_env!(builder.predecessor_account_id(accounts(TEE)).build());
+        contract.register(
+            hex64('a'),
+            hex64('b'),
+            hex64('c'),
+            hex64('d'),
+            hex64('e'),
+            Some("encrypted_nsek_value".to_string()),
+        );
+
+        let identity = contract.get_identity_by_npub(hex64('a'));
+        assert!(identity.is_some());
+        let info = identity.unwrap();
+        assert_eq!(info.npub, hex64('a'));
+        assert_eq!(info.encrypted_nsec, Some("encrypted_nsek_value".to_string()));
+
+        let not_found = contract.get_identity_by_npub(hex64('z'));
+        assert_eq!(not_found, None);
     }
 
     #[test]
