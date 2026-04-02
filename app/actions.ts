@@ -82,12 +82,23 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
 
     console.log('Calling TEE:', url)
     console.log('Action:', teeInput.action, '| Account:', accountId, '| Npub:', npub.slice(0, 16) + '...')
+    console.log('Request payload:', JSON.stringify({
+      input: teeInput,
+      secrets_ref: SECRETS_ACCOUNT ? {
+        profile: SECRETS_PROFILE,
+        account_id: SECRETS_ACCOUNT,
+      } : undefined,
+    }, null, 2))
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 180000) // 3 minute timeout
 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Payment-Key': PAYMENT_KEY,
+        'X-Compute-Limit': '500000', // $0.50 max compute budget
       },
       body: JSON.stringify({
         input: teeInput,
@@ -98,16 +109,34 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
           }
         } : {}),
       }),
+      signal: controller.signal,
     })
+
+    clearTimeout(timeoutId)
+
+    // Log response status before parsing
+    console.log('Response status:', response.status, response.statusText)
 
     if (!response.ok) {
       const text = await response.text()
-      const errorMsg = `OutLayer API ${response.status}: ${text.slice(0, 300)}`
+      const errorMsg = `OutLayer API ${response.status}: ${text.slice(0, 500)}`
       console.error('❌ TEE API Error:', errorMsg)
+      console.error('Response headers:', Object.fromEntries(response.headers.entries()))
+
+      // Specific error messages
+      if (response.status === 401) {
+        throw new Error('Invalid or missing Payment Key. Check OUTLAYER_PAYMENT_KEY env var.')
+      } else if (response.status === 402) {
+        throw new Error('Insufficient balance on Payment Key. Add USD stablecoins to your payment key.')
+      } else if (response.status === 404) {
+        throw new Error('Project not found. Check OUTLAYER_PROJECT_ID: ' + OUTLAYER_PROJECT)
+      }
       throw new Error(errorMsg)
     }
 
     const data = await response.json()
+    console.log('📥 OutLayer response status:', data.status)
+    console.log('📥 Compute cost:', data.compute_cost, 'micro-units ($' + (Number(data.compute_cost || 0) / 1000000).toFixed(6) + ')')
     console.log('📥 OutLayer FULL response:', JSON.stringify(data, null, 2))
 
     // OutLayer wraps result: { status: "completed", output: "...", ... }
