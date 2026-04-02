@@ -20,6 +20,7 @@ pub struct IdentityInfo {
     pub commitment: String,
     pub nullifier: String,
     pub created_at: u64,
+    pub encrypted_nsec: Option<String>, // AES-256 encrypted nsec, base64
 }
 
 #[derive(BorshSerialize, BorshDeserialize, BorshStorageKey)]
@@ -83,6 +84,7 @@ impl NostrIdentityContract {
         commitment: String,
         nullifier: String,
         pairing_input: String,
+        encrypted_nsec: Option<String>,
     ) {
         assert!(self.relayers.contains(&env::predecessor_account_id()), "Not a registered relayer");
         vhex(&npub, "npub", 64);
@@ -104,6 +106,7 @@ impl NostrIdentityContract {
         let id = IdentityInfo {
             npub: npub.clone(), commitment, nullifier: nullifier.clone(),
             created_at: env::block_timestamp_ms(),
+            encrypted_nsec,
         };
         self.identities.insert(&id.npub, &id);
         self.commitments.insert(&id.commitment, &id.npub);

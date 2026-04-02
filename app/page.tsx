@@ -104,6 +104,7 @@ export default function Home() {
   const [showKey, setShowKey] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
   const [resolvedNpub, setResolvedNpub] = useState<string | null>(null)
+  const [recoveredNsec, setRecoveredNsec] = useState<string | null>(null)
 
   useEffect(() => {
     const init = async () => {
@@ -211,18 +212,37 @@ export default function Home() {
       }
 
       // Step 3: Compute privacy-preserving nullifier from passkey credential ID
-      // SHA256(credentialId) — deterministic per device, prevents double registration
-      // Nobody can link nullifier to account — credential ID is random and never sent on-chain
       const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
       const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
 
-      // Step 4: Send to relayer — relayer submits tx on-chain so user's NEAR account
-      // is NOT visible in the transaction. Privacy preserved.
+      // Step 4: Encrypt nsec with AES-GCM for on-chain backup (recoverable with passkey)
+      const aesKeyMaterial = await crypto.subtle.digest('SHA-256', credential.rawId)
+      const aesKey = await crypto.subtle.importKey(
+        'raw',
+        aesKeyMaterial,
+        { name: 'AES-GCM' },
+        false,
+        ['encrypt']
+      )
+      const iv = crypto.getRandomValues(new Uint8Array(12))
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        aesKey,
+        new TextEncoder().encode(keypair.privateKeyHex)
+      )
+      // Combine iv + ciphertext → base64
+      const combined = new Uint8Array(iv.length + new Uint8Array(encrypted).length)
+      combined.set(iv)
+      combined.set(new Uint8Array(encrypted), iv.length)
+      const encryptedNsec = btoa(Array.from(combined).map(b => String.fromCharCode(b)).join(''))
+
+      // Step 5: Send to relayer
       const data = await submitToRelayer({
         npub: keypair.publicKeyHex,
         commitment: proofResult.commitment,
         nullifier,
         pairingInput,
+        encryptedNsec,
       })
 
       if (!data.success) {
@@ -293,21 +313,117 @@ export default function Home() {
       const result = data.result?.result
       if (!result) throw new Error('Identity not found')
 
-      // Decode the npub from the contract response
-      const npubBytes = new Uint8Array(result)
-      const npubStr = new TextDecoder().decode(npubBytes)
-
-      // The result is borsh-serialized Option<String>, extract the string
-      // Format: [1 (some flag), 8 bytes length, string bytes]
-      if (npubBytes[0] === 0) throw new Error('No identity found for this passkey')
-
-      // Parse borsh Option<String>
-      const len = Number(new DataView(npubBytes.buffer).getBigUint64(1, true))
-      const npub = new TextDecoder().decode(npubBytes.slice(9, 9 + len))
+      // RPC call_function returns bytes of JSON response
+      const jsonStr = new TextDecoder().decode(new Uint8Array(result))
+      const npub = JSON.parse(jsonStr)
+      if (!npub) throw new Error('No identity found for this passkey')
 
       setResolvedNpub(npub)
     } catch (err: any) {
       setError(err.message || 'Passkey login failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const recoverNsec = async () => {
+    setLoading(true)
+    setError('')
+    setRecoveredNsec(null)
+
+    try {
+      const passkeyChallenge = new Uint8Array(32)
+      crypto.getRandomValues(passkeyChallenge)
+
+      const credential = await navigator.credentials.get({
+        publicKey: {
+          challenge: passkeyChallenge,
+          rpId: window.location.hostname,
+          userVerification: 'required',
+          timeout: 60000,
+        },
+      }) as PublicKeyCredential
+
+      const nullifierHash = await crypto.subtle.digest('SHA-256', credential.rawId)
+      const nullifier = Array.from(new Uint8Array(nullifierHash)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '')
+
+      // Step 1: Resolve nullifier → npub
+      const resolveResp = await fetch('https://rpc.testnet.fastnear.com/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'resolve',
+          method: 'query',
+          params: {
+            request_type: 'call_function',
+            account_id: 'nostr-identity.kampouse.testnet',
+            method_name: 'resolve_nullifier',
+            args_base64: btoa(JSON.stringify({ nullifier })),
+            finality: 'final',
+          },
+        }),
+      })
+
+      const resolveData = await resolveResp.json()
+      const resolveResult = resolveData.result?.result
+      if (!resolveResult) throw new Error('Identity not found')
+
+      // RPC returns JSON bytes — parse the npub
+      const npubJson = JSON.parse(new TextDecoder().decode(new Uint8Array(resolveResult)))
+      if (!npubJson) throw new Error('No identity found for this passkey')
+      const npub = npubJson as string
+
+      // Step 2: Fetch full identity (includes encrypted_nsec)
+      const idResp = await fetch('https://rpc.testnet.fastnear.com/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'get-full',
+          method: 'query',
+          params: {
+            request_type: 'call_function',
+            account_id: 'nostr-identity.kampouse.testnet',
+            method_name: 'get_identity_by_npub',
+            args_base64: btoa(JSON.stringify({ npub })),
+            finality: 'final',
+          },
+        }),
+      })
+
+      const idData = await idResp.json()
+      const idResult = idData.result?.result
+      if (!idResult) throw new Error('Could not fetch identity details')
+
+      const idJson = JSON.parse(new TextDecoder().decode(new Uint8Array(idResult)))
+      const encryptedB64 = idJson.encrypted_nsec
+      if (!encryptedB64) throw new Error('No encrypted nsec stored — recovery not available')
+
+      // Step 3: Decrypt nsec with AES-GCM using SHA256(credentialId) as key
+      const aesKey = await crypto.subtle.importKey(
+        'raw',
+        await crypto.subtle.digest('SHA-256', credential.rawId),
+        { name: 'AES-GCM' },
+        false,
+        ['decrypt']
+      )
+
+      const combined = Uint8Array.from(atob(encryptedB64), c => c.charCodeAt(0))
+      const iv = combined.slice(0, 12)
+      const ciphertext = combined.slice(12)
+
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        aesKey,
+        ciphertext
+      )
+
+      const nsecHex = new TextDecoder().decode(decrypted)
+      const nsecBech32 = encodeBech32('nsec', nsecHex)
+      setRecoveredNsec(nsecBech32)
+    } catch (err: any) {
+      setError(err.message || 'Recovery failed')
     } finally {
       setLoading(false)
     }
@@ -655,7 +771,7 @@ export default function Home() {
       {!identity && (
         <div className="max-w-xl mx-auto px-6 pb-8">
           <div className="border border-[var(--border-subtle)] rounded-xl p-5 bg-[var(--bg-secondary)] space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
               <h3 className="text-sm font-medium text-[var(--text-primary)]">
                 Already have an identity?
               </h3>
@@ -667,7 +783,17 @@ export default function Home() {
                   hover:border-[var(--accent-near)]/50 hover:text-[var(--accent-near)]
                   transition-colors duration-200 disabled:opacity-50"
               >
-                🔐 Login with passkey
+                🔐 Login
+              </button>
+              <button
+                onClick={recoverNsec}
+                disabled={loading}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium
+                  bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-secondary)]
+                  hover:border-[var(--accent-warning)]/50 hover:text-[var(--accent-warning)]
+                  transition-colors duration-200 disabled:opacity-50"
+              >
+                🔑 Recover nsec
               </button>
             </div>
 
@@ -678,6 +804,24 @@ export default function Home() {
                 <p className="text-xs text-[var(--text-muted)] mt-2">
                   npub: <span className="font-mono">{encodeBech32('npub', resolvedNpub)}</span>
                 </p>
+              </div>
+            )}
+
+            {recoveredNsec && (
+              <div className="p-3 rounded-lg bg-[var(--accent-success)]/5 border border-[var(--accent-success)]/20 animate-fade-in space-y-2">
+                <p className="text-xs text-[var(--accent-success)] font-medium">✅ nsec recovered!</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs font-mono text-[var(--text-primary)] break-all flex-1 bg-[var(--bg-primary)] p-2 rounded">
+                    {recoveredNsec}
+                  </code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(recoveredNsec)}
+                    className="shrink-0 px-2 py-1 text-xs rounded bg-[var(--accent-near)] text-black hover:bg-[var(--accent-near-hover)]"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p className="text-[10px] text-[var(--accent-warning)]">⚠️ Save this now — it won't be shown again</p>
               </div>
             )}
           </div>

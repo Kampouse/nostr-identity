@@ -9,6 +9,7 @@ interface RegisterParams {
   commitment: string
   nullifier: string
   pairingInput: string
+  encryptedNsec?: string
 }
 
 export async function submitToRelayer(params: RegisterParams): Promise<{
@@ -17,7 +18,7 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
   created_at?: number
   error?: string
 }> {
-  const { npub, commitment, nullifier, pairingInput } = params
+  const { npub, commitment, nullifier, pairingInput, encryptedNsec } = params
 
   try {
     if (!npub || npub.length !== 64) throw new Error('Invalid npub')
@@ -30,6 +31,7 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
       commitment,
       nullifier,
       pairing_input: pairingInput,
+      encrypted_nsec: encryptedNsec || null,
     })
 
     const result = execSync(
