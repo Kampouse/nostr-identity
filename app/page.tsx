@@ -345,7 +345,7 @@ export default function Home() {
       }, null, 2))
       console.log('='.repeat(60))
 
-      // Step 2: Get passkey — user must have registered it first via the "Register passkey" button
+      // Step 2: Get or create passkey — fallback to create if none exists
       const passkeyChallenge = new Uint8Array(32)
       crypto.getRandomValues(passkeyChallenge)
 
@@ -356,16 +356,44 @@ export default function Home() {
 
       console.log('Requesting passkey authentication...')
 
-      const credential = await navigator.credentials.get({
-        publicKey: {
-          challenge: passkeyChallenge,
-          rpId: rpId,
-          userVerification: 'required',
-          timeout: 60000,
-        },
-      }) as PublicKeyCredential
+      let credential: PublicKeyCredential
+      try {
+        // Try to find existing passkey on this device
+        credential = await navigator.credentials.get({
+          publicKey: {
+            challenge: passkeyChallenge,
+            rpId: rpId,
+            userVerification: 'required',
+            timeout: 60000,
+          },
+        }) as PublicKeyCredential
+        console.log('✅ Got existing passkey credential')
+      } catch {
+        // No existing passkey — create one
+        console.log('No existing passkey, creating new one...')
+        credential = await navigator.credentials.create({
+          publicKey: {
+            challenge: passkeyChallenge,
+            rp: { name: 'Nostr Identity', id: rpId },
+            user: {
+              id: new TextEncoder().encode(accountId).slice(0, 64),
+              name: accountId,
+              displayName: `Nostr Identity for ${accountId}`,
+            },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+            authenticatorSelection: {
+              authenticatorAttachment: 'platform',
+              userVerification: 'required',
+              residentKey: 'required',
+            },
+            timeout: 60000,
+          },
+        } as any) as PublicKeyCredential
+        console.log('✅ Created new passkey credential')
+        addPasskeyAccount(accountId)
+        setHasPasskey(true)
+      }
 
-      console.log('✅ Got passkey credential')
       console.log('  → Credential ID length:', credential.rawId.byteLength)
 
       // Step 3: Generate ZKP proof in browser (keys never leave browser)
@@ -592,10 +620,11 @@ export default function Home() {
       const resolveResult = resolveData.result?.result
       if (!resolveResult) throw new Error('Identity not found')
 
-      // RPC returns JSON bytes — parse the npub
-      const npubJson = JSON.parse(new TextDecoder().decode(new Uint8Array(resolveResult)))
-      if (!npubJson) throw new Error('No identity found for this passkey')
-      const npub = npubJson as string
+      // Decode borsh Option<String>
+      const resolveBytes = new Uint8Array(resolveResult)
+      if (resolveBytes[0] === 0) throw new Error('No identity found for this passkey')
+      const resolveLen = Number(new DataView(resolveBytes.buffer).getBigUint64(1, true))
+      const npub = new TextDecoder().decode(resolveBytes.slice(9, 9 + resolveLen))
 
       // Step 2: Fetch full identity (includes encrypted_nsec)
       const idResp = await fetch('https://rpc.testnet.fastnear.com/', {
