@@ -17,6 +17,7 @@ fn main() {
     // Read input from stdin
     // Read input from stdin
     let mut input = String::new();
+    eprintln!("🔵 DEBUG: Reading stdin...");
     if let Err(e) = io::stdin().read_to_string(&mut input) {
         let error_response = serde_json::json!({
             "success": false,
@@ -25,11 +26,14 @@ fn main() {
         let _ = io::stdout().write_all(serde_json::to_string(&error_response).unwrap().as_bytes());
         return;
     }
+    eprintln!("🔵 DEBUG: Stdin read, input length: {}", input.len());
 
     // Parse action
+    eprintln!("🔵 DEBUG: Parsing action...");
     let action: Action = match serde_json::from_str(&input) {
         Ok(a) => a,
         Err(e) => {
+            eprintln!("🔵 DEBUG: Parse failed: {}", e);
             let result = nostr_identity_zkp_tee::ActionResult {
                 success: false,
                 error: Some(format!("Invalid input: {}", e)),
@@ -40,8 +44,10 @@ fn main() {
             return;
         }
     };
+    eprintln!("🔵 DEBUG: Action parsed successfully");
 
     // Execute action (with panic catching)
+    eprintln!("🔵 DEBUG: Executing action...");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handle_action(action)
     })).unwrap_or_else(|panic_info| {
@@ -52,6 +58,7 @@ fn main() {
             ..Default::default()
         }
     });
+    eprintln!("🔵 DEBUG: Action executed");
 
     // Log result for debugging
     if result.success {
