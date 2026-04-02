@@ -1,20 +1,8 @@
 'use server'
-
-import {
-  JsonRpcProvider,
-  KeyPair,
-  KeyPairSigner,
-  createTransaction,
-  actions,
-  baseDecode,
-} from 'near-api-js'
+import { execSync } from 'child_process'
 
 const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || 'nostr-identity.kampouse.testnet'
-const NETWORK_ID = 'testnet'
-const RPC_URL = 'https://rpc.testnet.fastnear.com'
-
 const RELAYER_ACCOUNT_ID = process.env.RELAYER_ACCOUNT_ID || 'kampouse.testnet'
-const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY || ''
 
 interface RegisterParams {
   npub: string
@@ -23,7 +11,7 @@ interface RegisterParams {
   pairingInput: string
 }
 
-export async function registerIdentityViaRelayer(params: RegisterParams): Promise<{
+export async function submitToRelayer(params: RegisterParams): Promise<{
   success: boolean
   transaction_hash?: string
   created_at?: number
@@ -32,60 +20,28 @@ export async function registerIdentityViaRelayer(params: RegisterParams): Promis
   const { npub, commitment, nullifier, pairingInput } = params
 
   try {
-    if (!RELAYER_PRIVATE_KEY) {
-      throw new Error('RELAYER_PRIVATE_KEY not configured — server cannot relay transactions')
-    }
-    if (!npub || npub.length !== 64) throw new Error('Invalid npub: must be 64 hex chars')
+    if (!npub || npub.length !== 64) throw new Error('Invalid npub')
     if (!commitment || commitment.length !== 64) throw new Error('Invalid commitment')
     if (!nullifier || nullifier.length !== 64) throw new Error('Invalid nullifier')
     if (!pairingInput) throw new Error('Missing pairing input')
 
-    const provider = new JsonRpcProvider({ url: RPC_URL })
-
-    const keyPair = KeyPair.fromString(RELAYER_PRIVATE_KEY)
-    const signer = new KeyPairSigner(keyPair)
-    const publicKey = keyPair.getPublicKey()
-
-    // Get relayer's access key nonce
-    const accessKey: any = await provider.query({
-      request_type: 'view_access_key',
-      account_id: RELAYER_ACCOUNT_ID,
-      public_key: publicKey.toString(),
-      finality: 'final',
-    })
-
-    const nonce = BigInt(accessKey.nonce) + 1n
-    const recentBlock = await provider.block({ finality: 'final' })
-    const blockHash = baseDecode(recentBlock.header.hash)
-
-    const args = {
+    const args = JSON.stringify({
       owner: RELAYER_ACCOUNT_ID,
       npub,
       commitment,
       nullifier,
       pairing_input: pairingInput,
-    }
+    })
 
-    const transaction = createTransaction(
-      RELAYER_ACCOUNT_ID,
-      publicKey,
-      CONTRACT_ID,
-      nonce,
-      [
-        actions.functionCall(
-          'register',
-          Buffer.from(JSON.stringify(args)),
-          50000000000000n,
-          0n,
-        ),
-      ],
-      blockHash,
+    // Use near CLI to submit — simplest, no library issues
+    const result = execSync(
+      `near call ${CONTRACT_ID} register '${args}' --accountId ${RELAYER_ACCOUNT_ID} --networkId testnet --gas 50000000000000 2>&1`,
+      { encoding: 'utf-8', timeout: 30000 }
     )
 
-    const signedTx = await signer.signTransaction(transaction)
-    const result = await provider.sendTransaction(signedTx)
-
-    const txHash = result.transaction?.hash || ''
+    // Parse transaction hash from output
+    const hashMatch = result.match(/Transaction Id\s+(\w+)/)
+    const txHash = hashMatch ? hashMatch[1] : ''
 
     return {
       success: true,
@@ -93,7 +49,8 @@ export async function registerIdentityViaRelayer(params: RegisterParams): Promis
       created_at: Date.now(),
     }
   } catch (error: any) {
-    console.error('Relayer registration error:', error)
-    return { success: false, error: error.message || 'Relayer failed' }
+    const msg = error.stdout || error.message || 'Relayer failed'
+    console.error('Relayer error:', msg)
+    return { success: false, error: msg.slice(0, 200) }
   }
 }

@@ -3,8 +3,7 @@
 import { useState, useEffect } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { encodeBech32, generateNostrKeypair } from '@nostr-identity/crypto'
-import { registerIdentityViaRelayer } from './actions'
-
+import { submitToRelayer } from './actions'
 let zkpWasm: any = null
 
 async function initZKP() {
@@ -108,10 +107,7 @@ export default function Home() {
   useEffect(() => {
     const init = async () => {
       const conn = new NearConnector({
-        signIn: {
-          contractId: 'v1.signer',
-          methodNames: ['derived_public_key', 'sign']
-        }
+        network: 'testnet',
       })
 
       conn.on('wallet:signIn', async (t) => {
@@ -174,7 +170,7 @@ export default function Home() {
 
       // Step 3: Send to relayer — relayer submits tx on-chain so user's NEAR account
       // is NOT visible in the transaction. Privacy preserved.
-      const data = await registerIdentityViaRelayer({
+      const data = await submitToRelayer({
         npub: keypair.publicKeyHex,
         commitment: proofResult.commitment,
         nullifier: proofResult.nullifier,
