@@ -120,7 +120,7 @@ fn compute_sha256(input: &str) -> Vec<u8> {
 fn get_or_create_salt() -> String {
     // Check in-memory cache first
     {
-        let salt_lock = ACCOUNT_HASH_SALT.lock().unwrap();
+        let salt_lock = get_account_hash_salt().lock().unwrap();
         if let Some(ref salt) = *salt_lock {
             return salt.clone();
         }
@@ -128,7 +128,7 @@ fn get_or_create_salt() -> String {
 
     // Try persistent TEE storage
     if let Some(salt) = tee_storage_get("account_hash_salt") {
-        ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
+        get_account_hash_salt().lock().unwrap().replace(salt.clone());
         return salt;
     }
 
@@ -141,7 +141,7 @@ fn get_or_create_salt() -> String {
     tee_storage_set("account_hash_salt", &salt);
 
     // Cache in memory
-    ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
+    get_account_hash_salt().lock().unwrap().replace(salt.clone());
 
     salt
 }
@@ -333,23 +333,46 @@ fn tee_storage_set(key: &str, value: &str) {
 }
 
 // In-memory storage (always available as fallback)
-lazy_static::lazy_static! {
-    static ref COMMITMENTS: std::sync::Mutex<HashMap<String, String>> = 
-        std::sync::Mutex::new(HashMap::new());
-    static ref NULLIFIERS: std::sync::Mutex<HashMap<String, String>> = 
-        std::sync::Mutex::new(HashMap::new());
-    static ref IDENTITIES: std::sync::Mutex<HashMap<String, IdentityInfo>> = 
-        std::sync::Mutex::new(HashMap::new());
-    static ref PROVING_KEY: std::sync::Mutex<Option<ProvingKey<Bn254>>> = 
-        std::sync::Mutex::new(None);
-    static ref VERIFYING_KEY: std::sync::Mutex<Option<VerifyingKey<Bn254>>> = 
-        std::sync::Mutex::new(None);
-    static ref USED_NONCES: std::sync::Mutex<HashMap<String, bool>> = 
-        std::sync::Mutex::new(HashMap::new());
-    /// TEE-bound salt for account_hash — generated once, never leaves the TEE.
-    /// Prevents precomputation attacks since NEAR account names are public.
-    static ref ACCOUNT_HASH_SALT: std::sync::Mutex<Option<String>> = 
-        std::sync::Mutex::new(None);
+use std::sync::{Mutex, OnceLock};
+
+static COMMITMENTS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static NULLIFIERS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static IDENTITIES: OnceLock<Mutex<HashMap<String, IdentityInfo>>> = OnceLock::new();
+static PROVING_KEY: OnceLock<Mutex<Option<ProvingKey<Bn254>>>> = OnceLock::new();
+static VERIFYING_KEY: OnceLock<Mutex<Option<VerifyingKey<Bn254>>>> = OnceLock::new();
+static USED_NONCES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+/// TEE-bound salt for account_hash — generated once, never leaves the TEE.
+/// Prevents precomputation attacks since NEAR account names are public.
+static ACCOUNT_HASH_SALT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+// Helper functions to initialize OnceLock values
+fn get_commitments() -> &'static Mutex<HashMap<String, String>> {
+    COMMITMENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_nullifiers() -> &'static Mutex<HashMap<String, String>> {
+    NULLIFIERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_identities() -> &'static Mutex<HashMap<String, IdentityInfo>> {
+    IDENTITIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_proving_key() -> &'static Mutex<Option<ProvingKey<Bn254>>> {
+    PROVING_KEY.get_or_init(|| Mutex::new(None))
+}
+
+fn get_verifying_key() -> &'static Mutex<Option<VerifyingKey<Bn254>>> {
+    VERIFYING_KEY.get_or_init(|| Mutex::new(None))
+}
+
+fn get_used_nonces() -> &'static Mutex<HashMap<String, bool>> {
+    USED_NONCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_account_hash_salt() -> &'static Mutex<Option<String>> {
+    ACCOUNT_HASH_SALT.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -379,7 +402,7 @@ fn verify_nep413_ownership(
     // Replay protection: check nonce hasn't been used
     let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
     {
-        let used = USED_NONCES.lock().unwrap();
+        let used = get_used_nonces().lock().unwrap();
         if used.contains_key(&nonce_key) {
             return Err("Nonce already used — replay attack detected".to_string());
         }
@@ -392,7 +415,7 @@ fn verify_nep413_ownership(
 
     // Mark nonce as used to prevent replay
     let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
-    USED_NONCES.lock().unwrap().insert(nonce_key, true);
+    get_used_nonces().lock().unwrap().insert(nonce_key, true);
 
     Ok(())
 }
@@ -508,13 +531,13 @@ fn load_shared_vk() -> Result<VerifyingKey<Bn254>, String> {
 /// Load the shared verifying key, caching it in memory.
 fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
     {
-        let vk_lock = VERIFYING_KEY.lock().unwrap();
+        let vk_lock = get_verifying_key().lock().unwrap();
         if vk_lock.is_some() {
             return Ok(vk_lock.as_ref().unwrap().clone());
         }
     }
     let vk = load_shared_vk()?;
-    let mut vk_lock = VERIFYING_KEY.lock().unwrap();
+    let mut vk_lock = get_verifying_key().lock().unwrap();
     *vk_lock = Some(vk.clone());
     Ok(vk)
 }
@@ -524,7 +547,7 @@ fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
 // ============================================================================
 
 fn initialize_zkp() -> Result<(), String> {
-    let mut pk_lock = PROVING_KEY.lock().unwrap();
+    let mut pk_lock = get_proving_key().lock().unwrap();
     
     if pk_lock.is_some() {
         return Ok(());
@@ -564,7 +587,7 @@ fn generate_real_zkp(
 ) -> Result<ZKPProof, String> {
     initialize_zkp()?;
     
-    let pk_lock = PROVING_KEY.lock().unwrap();
+    let pk_lock = get_proving_key().lock().unwrap();
     let pk = pk_lock.as_ref()
         .ok_or("ZKP not initialized")?;
     
@@ -648,7 +671,7 @@ fn is_commitment_used(commitment: &str) -> bool {
     }
     
     // Fallback to in-memory
-    let commitments = COMMITMENTS.lock().unwrap();
+    let commitments = get_commitments().lock().unwrap();
     commitments.contains_key(commitment)
 }
 
@@ -666,9 +689,9 @@ fn store_identity(commitment: &str, nullifier: &str, npub: &str, created_at: u64
     tee_storage_set(&format!("npub:{}", npub), &serde_json::to_string(&info).unwrap());
 
     // Also store in memory for fast access
-    COMMITMENTS.lock().unwrap().insert(commitment.to_string(), npub.to_string());
-    NULLIFIERS.lock().unwrap().insert(nullifier.to_string(), npub.to_string());
-    IDENTITIES.lock().unwrap().insert(npub.to_string(), info);
+    get_commitments().lock().unwrap().insert(commitment.to_string(), npub.to_string());
+    get_nullifiers().lock().unwrap().insert(nullifier.to_string(), npub.to_string());
+    get_identities().lock().unwrap().insert(npub.to_string(), info);
 }
 
 fn generate_attestation() -> Attestation {
@@ -976,7 +999,7 @@ fn handle_generate(
 fn handle_get_identity(npub: String) -> ActionResult {
     // Try memory first (fast)
     {
-        let identities = IDENTITIES.lock().unwrap();
+        let identities = get_identities().lock().unwrap();
         if let Some(info) = identities.get(&npub) {
             return ActionResult {
                 success: true,
@@ -1028,7 +1051,7 @@ fn handle_recover(account_id: String, nep413_response: Nep413AuthResponse) -> Ac
     let npub = if let Some(npub) = tee_storage_get(&format!("commitment:{}", commitment)) {
         npub
     } else {
-        let commitments = COMMITMENTS.lock().unwrap();
+        let commitments = get_commitments().lock().unwrap();
         match commitments.get(&commitment) {
             Some(npub) => npub.clone(),
             None => {
@@ -1276,7 +1299,7 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
 }
 
 fn handle_stats() -> ActionResult {
-    let identities = IDENTITIES.lock().unwrap();
+    let identities = get_identities().lock().unwrap();
     let count = identities.len();
     
     ActionResult {
@@ -2206,7 +2229,7 @@ mod vk_export {
     #[test]
     fn export_vk_hex() {
         initialize_zkp().unwrap();
-        let vk_lock = VERIFYING_KEY.lock().unwrap();
+        let vk_lock = get_verifying_key().lock().unwrap();
         let vk = vk_lock.as_ref().unwrap();
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
