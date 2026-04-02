@@ -11,6 +11,16 @@ const nextConfig = {
       stream: false,
       path: false,
     };
+
+    // Handle WASM files - copy them to public instead of bundling
+    config.module.rules.push({
+      test: /\.wasm$/,
+      type: 'asset/resource',
+      generator: {
+        filename: 'static/wasm/[name][ext]',
+      },
+    });
+
     return config;
   },
 };

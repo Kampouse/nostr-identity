@@ -6,6 +6,15 @@ use nostr_identity_zkp_tee::{handle_action, Action};
 use std::io::{self, Read, Write};
 
 fn main() {
+    // Set panic handler to log panics before crashing
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("❌ TEE PANIC: {}", panic_info);
+        if let Some(location) = panic_info.location() {
+            eprintln!("   Location: {}:{}:{}", location.file(), location.line(), location.column());
+        }
+    }));
+
+    // Read input from stdin
     // Read input from stdin
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
@@ -32,8 +41,24 @@ fn main() {
         }
     };
 
-    // Execute action
-    let result = handle_action(action);
+    // Execute action (with panic catching)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_action(action)
+    })).unwrap_or_else(|panic_info| {
+        eprintln!("❌ TEE PANIC CAUGHT: {:?}", panic_info);
+        nostr_identity_zkp_tee::ActionResult {
+            success: false,
+            error: Some(format!("TEE internal error: operation panicked - {:?}", panic_info)),
+            ..Default::default()
+        }
+    });
+
+    // Log result for debugging
+    if result.success {
+        eprintln!("✅ TEE operation successful");
+    } else {
+        eprintln!("❌ TEE operation failed: {:?}", result.error);
+    }
 
     // Write output to stdout
     let output = match serde_json::to_string(&result) {
