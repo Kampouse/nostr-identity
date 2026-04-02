@@ -58,7 +58,7 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
     if (!PAYMENT_KEY) throw new Error('OUTLAYER_PAYMENT_KEY not configured')
 
     // Build the action payload — this becomes stdin JSON for the TEE WASM
-    const teeInput = {
+    const teeInput: any = {
       action: 'register_with_zkp',
       zkp_proof: {
         proof: zkpProof.proof,
@@ -76,6 +76,11 @@ export async function submitToRelayer(params: RegisterParams): Promise<{
       },
       writer_contract_id: CONTRACT_ID,
       deadline: Math.floor(Date.now() / 1000) + 300,
+    }
+
+    // Add encrypted_nsec if provided
+    if (params.encryptedNsec) {
+      teeInput.encrypted_nsec = params.encryptedNsec
     }
 
     const url = `${OUTLAYER_API}/${OUTLAYER_PROJECT}`

@@ -793,6 +793,9 @@ pub enum Action {
         writer_contract_id: String,
         /// Transaction deadline
         deadline: u64,
+        /// Optional encrypted nsec backup (AES-256-GCM encrypted with SHA256(passkey))
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_nsec: Option<String>,
         /// Optional signing key (TESTING ONLY - INSECURE)
         #[serde(skip_serializing_if = "Option::is_none")]
         signing_key: Option<String>,
@@ -854,6 +857,7 @@ pub fn handle_action(action: Action) -> ActionResult {
             nep413_response,
             writer_contract_id,
             deadline,
+            encrypted_nsec,
             signing_key,
         } => {
             handle_register_with_zkp(
@@ -863,6 +867,7 @@ pub fn handle_action(action: Action) -> ActionResult {
                 nep413_response,
                 writer_contract_id,
                 deadline,
+                encrypted_nsec,
                 signing_key,
             )
         }
@@ -1524,6 +1529,7 @@ fn handle_register_with_zkp(
     nep413_response: Nep413AuthResponse,
     writer_contract_id: String,
     deadline: u64,
+    encrypted_nsec: Option<String>,
     signing_key: Option<String>,
 ) -> ActionResult {
     // 1. Verify NEP-413 — proves the user owns this NEAR account
@@ -1591,14 +1597,19 @@ fn handle_register_with_zkp(
 
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 7. Register on-chain — stores npub, commitment, nullifier, account_hash, proof
-    let register_args = serde_json::json!({
+    // 7. Register on-chain — stores npub, commitment, nullifier, account_hash, proof, encrypted_nsec
+    let mut register_args = serde_json::json!({
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
         "account_hash": account_hash,
         "proof_b64": zkp_proof.proof,
     });
+
+    // Add encrypted_nsec if provided
+    if let Some(ref encrypted) = encrypted_nsec {
+        register_args["encrypted_nsec"] = serde_json::json!(encrypted);
+    }
 
     let args_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
