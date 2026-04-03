@@ -1,0 +1,6 @@
+# OutLayer deployment configuration
+[build]
+target = "wasm32-wasip1"
+
+[deploy]
+project = "nostr-identity-zkp-tee"

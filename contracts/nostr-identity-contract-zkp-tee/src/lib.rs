@@ -120,7 +120,7 @@ fn compute_sha256(input: &str) -> Vec<u8> {
 fn get_or_create_salt() -> String {
     // Check in-memory cache first
     {
-        let salt_lock = get_account_hash_salt().lock().unwrap();
+        let salt_lock = ACCOUNT_HASH_SALT.lock().unwrap();
         if let Some(ref salt) = *salt_lock {
             return salt.clone();
         }
@@ -128,7 +128,7 @@ fn get_or_create_salt() -> String {
 
     // Try persistent TEE storage
     if let Some(salt) = tee_storage_get("account_hash_salt") {
-        get_account_hash_salt().lock().unwrap().replace(salt.clone());
+        ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
         return salt;
     }
 
@@ -141,7 +141,7 @@ fn get_or_create_salt() -> String {
     tee_storage_set("account_hash_salt", &salt);
 
     // Cache in memory
-    get_account_hash_salt().lock().unwrap().replace(salt.clone());
+    ACCOUNT_HASH_SALT.lock().unwrap().replace(salt.clone());
 
     salt
 }
@@ -173,8 +173,6 @@ pub struct Nep413AuthRequest {
     pub message: String,
     pub nonce: String,
     pub recipient: String,
-    #[serde(default)]
-    pub callback_url: String,  // Optional per NEP-413 spec
 }
 
 /// NEP-413 Borsh payload — matches what wallets sign
@@ -184,7 +182,6 @@ struct Nep413BorshPayload<'a> {
     message: &'a str,
     nonce: &'a [u8],
     recipient: &'a str,
-    callback_url: &'a str,  // Required for NEP-413 compatibility
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -224,9 +221,6 @@ pub struct ActionResult {
     /// Signed transaction ready to submit (when using RegisterWithZkp)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed_transaction: Option<serde_json::Value>,
-    /// Encrypted nsec backup (AES-256-GCM encrypted with passkey)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encrypted_nsec: Option<String>,
 }
 
 // For delegated registration via smart contract
@@ -262,20 +256,28 @@ pub struct Attestation {
 
 // OutLayer storage API (persistent across invocations)
 // Only available when built with `--features outlayer-tee`
-// #[cfg(feature = "outlayer-tee")]
-// extern "C" {
-//     fn storage_get(key: *const u8, key_len: usize) -> *mut u8;
-//     fn storage_set(key: *const u8, key_len: usize, value: *const u8, value_len: usize);
-//     fn storage_len() -> usize;
-// }
+#[cfg(feature = "outlayer-tee")]
+extern "C" {
+    fn storage_get(key: *const u8, key_len: usize) -> *mut u8;
+    fn storage_set(key: *const u8, key_len: usize, value: *const u8, value_len: usize);
+    fn storage_len() -> usize;
+}
 
 // Helper: Get from persistent storage
 fn tee_storage_get(key: &str) -> Option<String> {
-    // #[cfg(feature = "outlayer-tee")]
-    // {
-    //     // WASI P2 doesn't provide storage functions - use smart contract instead
-    //     None
-    // }
+    #[cfg(feature = "outlayer-tee")]
+    {
+        let key_bytes = key.as_bytes();
+        unsafe {
+            let ptr = storage_get(key_bytes.as_ptr(), key_bytes.len());
+            if ptr.is_null() {
+                return None;
+            }
+            let len = storage_len();
+            let bytes = std::slice::from_raw_parts(ptr, len);
+            Some(String::from_utf8_lossy(bytes).to_string())
+        }
+    }
 
     #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
@@ -292,16 +294,24 @@ fn tee_storage_get(key: &str) -> Option<String> {
         // No persistent storage in default mode
         None
     }
-
-    #[cfg(feature = "outlayer-tee")]
-    {
-        // WASI P2 doesn't provide storage functions - always query smart contract
-        None
-    }
 }
 
 // Helper: Set persistent storage
 fn tee_storage_set(key: &str, value: &str) {
+    #[cfg(feature = "outlayer-tee")]
+    {
+        let key_bytes = key.as_bytes();
+        let value_bytes = value.as_bytes();
+        unsafe {
+            storage_set(
+                key_bytes.as_ptr(),
+                key_bytes.len(),
+                value_bytes.as_ptr(),
+                value_bytes.len(),
+            );
+        }
+    }
+
     #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
         // File-backed storage for local testing
@@ -317,55 +327,26 @@ fn tee_storage_set(key: &str, value: &str) {
     {
         // No persistent storage in default mode
     }
-
-    #[cfg(feature = "outlayer-tee")]
-    {
-        // WASI P2 doesn't provide storage functions - store in smart contract instead
-        let _ = (key, value); // Suppress unused warnings
-    }
 }
 
 // In-memory storage (always available as fallback)
-use std::sync::{Mutex, OnceLock};
-
-static COMMITMENTS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-static NULLIFIERS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-static IDENTITIES: OnceLock<Mutex<HashMap<String, IdentityInfo>>> = OnceLock::new();
-static PROVING_KEY: OnceLock<Mutex<Option<ProvingKey<Bn254>>>> = OnceLock::new();
-static VERIFYING_KEY: OnceLock<Mutex<Option<VerifyingKey<Bn254>>>> = OnceLock::new();
-static USED_NONCES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
-/// TEE-bound salt for account_hash — generated once, never leaves the TEE.
-/// Prevents precomputation attacks since NEAR account names are public.
-static ACCOUNT_HASH_SALT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-
-// Helper functions to initialize OnceLock values
-fn get_commitments() -> &'static Mutex<HashMap<String, String>> {
-    COMMITMENTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_nullifiers() -> &'static Mutex<HashMap<String, String>> {
-    NULLIFIERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_identities() -> &'static Mutex<HashMap<String, IdentityInfo>> {
-    IDENTITIES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_proving_key() -> &'static Mutex<Option<ProvingKey<Bn254>>> {
-    PROVING_KEY.get_or_init(|| Mutex::new(None))
-}
-
-fn get_verifying_key() -> &'static Mutex<Option<VerifyingKey<Bn254>>> {
-    VERIFYING_KEY.get_or_init(|| Mutex::new(None))
-}
-
-fn get_used_nonces() -> &'static Mutex<HashMap<String, bool>> {
-    USED_NONCES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_account_hash_salt() -> &'static Mutex<Option<String>> {
-    ACCOUNT_HASH_SALT.get_or_init(|| Mutex::new(None))
+lazy_static::lazy_static! {
+    static ref COMMITMENTS: std::sync::Mutex<HashMap<String, String>> = 
+        std::sync::Mutex::new(HashMap::new());
+    static ref NULLIFIERS: std::sync::Mutex<HashMap<String, String>> = 
+        std::sync::Mutex::new(HashMap::new());
+    static ref IDENTITIES: std::sync::Mutex<HashMap<String, IdentityInfo>> = 
+        std::sync::Mutex::new(HashMap::new());
+    static ref PROVING_KEY: std::sync::Mutex<Option<ProvingKey<Bn254>>> = 
+        std::sync::Mutex::new(None);
+    static ref VERIFYING_KEY: std::sync::Mutex<Option<VerifyingKey<Bn254>>> = 
+        std::sync::Mutex::new(None);
+    static ref USED_NONCES: std::sync::Mutex<HashMap<String, bool>> = 
+        std::sync::Mutex::new(HashMap::new());
+    /// TEE-bound salt for account_hash — generated once, never leaves the TEE.
+    /// Prevents precomputation attacks since NEAR account names are public.
+    static ref ACCOUNT_HASH_SALT: std::sync::Mutex<Option<String>> = 
+        std::sync::Mutex::new(None);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -388,27 +369,64 @@ fn verify_nep413_ownership(
         return Err("Account ID mismatch".to_string());
     }
 
-    if nep413_response.auth_request.recipient != "nostr-identity.kampouse.testnet" {
+    if nep413_response.auth_request.recipient != "nostr-identity.near" {
         return Err("Invalid recipient".to_string());
     }
 
     // Replay protection: check nonce hasn't been used
     let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
     {
-        let used = get_used_nonces().lock().unwrap();
+        let used = USED_NONCES.lock().unwrap();
         if used.contains_key(&nonce_key) {
             return Err("Nonce already used — replay attack detected".to_string());
         }
     }
 
     // Verify the public key actually belongs to this account on NEAR
-    // DISABLED: Skipping NEP-413 verification due to wallet signing format incompatibilities
-    // TODO: Re-enable once NEP-413 signature format is aligned
-    eprintln!("⚠️  NEP-413 verification DISABLED (dev mode - account ownership not verified)");
+    verify_account_key_ownership(account_id, &nep413_response.public_key)?;
+
+    // Step 2: Parse and verify signature
+    let sig_bytes = parse_signature(&nep413_response.signature)?;
+    if sig_bytes.len() != 64 {
+        return Err("Invalid signature length".to_string());
+    }
+
+    let signature = Signature::from_bytes(
+        sig_bytes.as_slice().try_into()
+            .map_err(|_| "Invalid signature bytes")?,
+    );
+
+    let pk_bytes = parse_public_key(&nep413_response.public_key)?;
+    
+    let public_key = Ed25519VerifyingKey::from_bytes(
+        pk_bytes.as_slice().try_into()
+            .map_err(|_| "Invalid public key bytes")?,
+    ).map_err(|e| format!("Invalid public key: {}", e))?;
+
+    // NEP-413 spec: wallet signs SHA-256 of borsh-serialized payload
+    // Payload: { tag: "nep413", message, nonce (raw 32 bytes), recipient, callback_url }
+    // The nonce from the frontend is base64-encoded raw bytes — decode first
+    let nonce_raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &nep413_response.auth_request.nonce)
+        .map_err(|e| format!("Invalid nonce base64: {}", e))?;
+
+    let borsh_payload = Nep413BorshPayload {
+        tag: "nep413",
+        message: &nep413_response.auth_request.message,
+        nonce: &nonce_raw,
+        recipient: &nep413_response.auth_request.recipient,
+    };
+    let borsh_bytes = borsh::to_vec(&borsh_payload)
+        .map_err(|e| format!("Borsh serialization failed: {}", e))?;
+
+    let message_hash = Sha256::digest(&borsh_bytes);
+
+    public_key
+        .verify_strict(&message_hash, &signature)
+        .map_err(|e| format!("Invalid signature: {}", e))?;
 
     // Mark nonce as used to prevent replay
     let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
-    get_used_nonces().lock().unwrap().insert(nonce_key, true);
+    USED_NONCES.lock().unwrap().insert(nonce_key, true);
 
     Ok(())
 }
@@ -524,13 +542,13 @@ fn load_shared_vk() -> Result<VerifyingKey<Bn254>, String> {
 /// Load the shared verifying key, caching it in memory.
 fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
     {
-        let vk_lock = get_verifying_key().lock().unwrap();
+        let vk_lock = VERIFYING_KEY.lock().unwrap();
         if vk_lock.is_some() {
             return Ok(vk_lock.as_ref().unwrap().clone());
         }
     }
     let vk = load_shared_vk()?;
-    let mut vk_lock = get_verifying_key().lock().unwrap();
+    let mut vk_lock = VERIFYING_KEY.lock().unwrap();
     *vk_lock = Some(vk.clone());
     Ok(vk)
 }
@@ -540,7 +558,7 @@ fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
 // ============================================================================
 
 fn initialize_zkp() -> Result<(), String> {
-    let mut pk_lock = get_proving_key().lock().unwrap();
+    let mut pk_lock = PROVING_KEY.lock().unwrap();
     
     if pk_lock.is_some() {
         return Ok(());
@@ -580,7 +598,7 @@ fn generate_real_zkp(
 ) -> Result<ZKPProof, String> {
     initialize_zkp()?;
     
-    let pk_lock = get_proving_key().lock().unwrap();
+    let pk_lock = PROVING_KEY.lock().unwrap();
     let pk = pk_lock.as_ref()
         .ok_or("ZKP not initialized")?;
     
@@ -664,7 +682,7 @@ fn is_commitment_used(commitment: &str) -> bool {
     }
     
     // Fallback to in-memory
-    let commitments = get_commitments().lock().unwrap();
+    let commitments = COMMITMENTS.lock().unwrap();
     commitments.contains_key(commitment)
 }
 
@@ -682,9 +700,9 @@ fn store_identity(commitment: &str, nullifier: &str, npub: &str, created_at: u64
     tee_storage_set(&format!("npub:{}", npub), &serde_json::to_string(&info).unwrap());
 
     // Also store in memory for fast access
-    get_commitments().lock().unwrap().insert(commitment.to_string(), npub.to_string());
-    get_nullifiers().lock().unwrap().insert(nullifier.to_string(), npub.to_string());
-    get_identities().lock().unwrap().insert(npub.to_string(), info);
+    COMMITMENTS.lock().unwrap().insert(commitment.to_string(), npub.to_string());
+    NULLIFIERS.lock().unwrap().insert(nullifier.to_string(), npub.to_string());
+    IDENTITIES.lock().unwrap().insert(npub.to_string(), info);
 }
 
 fn generate_attestation() -> Attestation {
@@ -786,11 +804,6 @@ pub enum Action {
         writer_contract_id: String,
         /// Transaction deadline
         deadline: u64,
-        /// Passkey-derived nullifier (SHA256 of credentialId) for dedup
-        nullifier: String,
-        /// Optional encrypted nsec backup (AES-256-GCM encrypted with SHA256(passkey))
-        #[serde(skip_serializing_if = "Option::is_none")]
-        encrypted_nsec: Option<String>,
         /// Optional signing key (TESTING ONLY - INSECURE)
         #[serde(skip_serializing_if = "Option::is_none")]
         signing_key: Option<String>,
@@ -852,8 +865,6 @@ pub fn handle_action(action: Action) -> ActionResult {
             nep413_response,
             writer_contract_id,
             deadline,
-            nullifier,
-            encrypted_nsec,
             signing_key,
         } => {
             handle_register_with_zkp(
@@ -863,8 +874,6 @@ pub fn handle_action(action: Action) -> ActionResult {
                 nep413_response,
                 writer_contract_id,
                 deadline,
-                nullifier,
-                encrypted_nsec,
                 signing_key,
             )
         }
@@ -924,8 +933,9 @@ fn handle_generate(
     let created_at = zkp_proof.timestamp;
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 6. Register on-chain with proof and account_hash
+    // 6. Register on-chain with proof — contract verifies Groth16 on-chain
     let register_args = serde_json::json!({
+        "owner": account_id,
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
@@ -1001,7 +1011,7 @@ fn handle_generate(
 fn handle_get_identity(npub: String) -> ActionResult {
     // Try memory first (fast)
     {
-        let identities = get_identities().lock().unwrap();
+        let identities = IDENTITIES.lock().unwrap();
         if let Some(info) = identities.get(&npub) {
             return ActionResult {
                 success: true,
@@ -1053,7 +1063,7 @@ fn handle_recover(account_id: String, nep413_response: Nep413AuthResponse) -> Ac
     let npub = if let Some(npub) = tee_storage_get(&format!("commitment:{}", commitment)) {
         npub
     } else {
-        let commitments = get_commitments().lock().unwrap();
+        let commitments = COMMITMENTS.lock().unwrap();
         match commitments.get(&commitment) {
             Some(npub) => npub.clone(),
             None => {
@@ -1301,7 +1311,7 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
 }
 
 fn handle_stats() -> ActionResult {
-    let identities = get_identities().lock().unwrap();
+    let identities = IDENTITIES.lock().unwrap();
     let count = identities.len();
     
     ActionResult {
@@ -1526,8 +1536,6 @@ fn handle_register_with_zkp(
     nep413_response: Nep413AuthResponse,
     writer_contract_id: String,
     deadline: u64,
-    nullifier: String,
-    encrypted_nsec: Option<String>,
     signing_key: Option<String>,
 ) -> ActionResult {
     // 1. Verify NEP-413 — proves the user owns this NEAR account
@@ -1539,7 +1547,7 @@ fn handle_register_with_zkp(
         };
     }
 
-    // 2. Extract commitment from ZKP public inputs
+    // 2. Extract commitment and nullifier from ZKP public inputs
     if zkp_proof.public_inputs.len() < 2 {
         return ActionResult {
             success: false,
@@ -1549,8 +1557,7 @@ fn handle_register_with_zkp(
     }
 
     let commitment = zkp_proof.public_inputs[0].clone();
-    // Use the client-provided passkey-derived nullifier (deterministic per passkey)
-    // NOT the ZKP-derived one (changes every proof generation)
+    let nullifier = zkp_proof.public_inputs[1].clone();
 
     // 3. Verify ZKP — NEVER trust client's "verified" flag
     // TEE must cryptographically verify the Groth16 proof
@@ -1596,19 +1603,14 @@ fn handle_register_with_zkp(
 
     store_identity(&commitment, &nullifier, &npub, created_at);
 
-    // 7. Register on-chain — stores npub, commitment, nullifier, account_hash, proof, encrypted_nsec
-    let mut register_args = serde_json::json!({
+    // 7. Register on-chain with proof — contract verifies Groth16 on-chain
+    let register_args = serde_json::json!({
         "npub": npub,
         "commitment": commitment,
         "nullifier": nullifier,
         "account_hash": account_hash,
         "proof_b64": zkp_proof.proof,
     });
-
-    // Add encrypted_nsec if provided
-    if let Some(ref encrypted) = encrypted_nsec {
-        register_args["encrypted_nsec"] = serde_json::json!(encrypted);
-    }
 
     let args_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -1660,12 +1662,11 @@ fn handle_register_with_zkp(
         }
     };
 
-    // 10. Return success with encrypted_nsec confirmation
+    // 10. Return success
     ActionResult {
         success: true,
         npub: Some(npub),
-        nsec: None,  // nsec is encrypted, not returned in plain text
-        encrypted_nsec: encrypted_nsec.clone(),  // Return encrypted version for confirmation
+        nsec: None,
         commitment: Some(commitment),
         nullifier: Some(nullifier),
         created_at: Some(created_at),
@@ -1826,11 +1827,8 @@ fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32]
         }
     });
     let ak_body = serde_json::to_string(&ak_req).map_err(|e| format!("Ser: {}", e))?;
-    eprintln!("🔍 Fetching access key: {} -> {}", account_id, public_key);
     let ak_resp = fetch_rpc(&rpc_url, &ak_body).map_err(|e| format!("AK RPC: {}", e))?;
-    eprintln!("📥 AK Response: {}", &ak_resp[..ak_resp.len().min(400)]);
     let ak_json: serde_json::Value = serde_json::from_str(&ak_resp).map_err(|e| format!("AK parse: {}", e))?;
-    eprintln!("📊 AK JSON: {}", serde_json::to_string(&ak_json).unwrap_or_default());
     let nonce: u64 = ak_json["result"]["nonce"].as_u64().ok_or("No nonce")?;
 
     Ok((block_hash, nonce))
@@ -2144,7 +2142,7 @@ mod tests {
         let account_id = "test-user.testnet";
         let message = "Generate Nostr identity for test-user.testnet";
         let nonce_raw: [u8; 32] = [0xab; 32];
-        let recipient = "nostr-identity.kampouse.testnet";
+        let recipient = "nostr-identity.near";
         
         // 2. Build NEP-413 Borsh payload (what wallet signs)
         #[derive(borsh::BorshSerialize)]
@@ -2240,7 +2238,7 @@ mod vk_export {
     #[test]
     fn export_vk_hex() {
         initialize_zkp().unwrap();
-        let vk_lock = get_verifying_key().lock().unwrap();
+        let vk_lock = VERIFYING_KEY.lock().unwrap();
         let vk = vk_lock.as_ref().unwrap();
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
