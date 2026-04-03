@@ -457,6 +457,41 @@ fn verify_nep413_ownership(
     let message_hash = Sha256::digest(&prefixed_bytes);
     eprintln!("    message hash (hex): {:02x?}", message_hash.as_slice());
 
+    // Try NEP-413 format first (correct)
+    let nep413_result = public_key.verify_strict(&message_hash, &signature);
+
+    // If that fails, try just the message bytes (some wallets might not do NEP-413)
+    if nep413_result.is_err() {
+        eprintln!("  ⚠️  NEP-413 verification failed, trying alternative formats...");
+
+        // Try 1: Just the message string as UTF-8 bytes
+        let message_bytes = nep413_response.auth_request.message.as_bytes();
+        let message_hash_alt = Sha256::digest(message_bytes);
+        eprintln!("    Alt 1 - message only hash: {:02x?}", message_hash_alt.as_slice());
+        if let Ok(_) = public_key.verify_strict(&message_hash_alt, &signature) {
+            return Err("Wallet signed plain message, not NEP-413 format".to_string());
+        }
+
+        // Try 2: Message + nonce concatenated
+        let mut msg_with_nonce = Vec::new();
+        msg_with_nonce.extend_from_slice(message_bytes);
+        msg_with_nonce.extend_from_slice(&nonce_raw);
+        let msg_with_nonce_hash = Sha256::digest(&msg_with_nonce);
+        eprintln!("    Alt 2 - message+nonce hash: {:02x?}", msg_with_nonce_hash.as_slice());
+        if let Ok(_) = public_key.verify_strict(&msg_with_nonce_hash, &signature) {
+            return Err("Wallet signed message+nonce, not NEP-413 format".to_string());
+        }
+
+        // Try 3: Borsh payload without tag prefix
+        let payload_hash = Sha256::digest(&payload_bytes);
+        eprintln!("    Alt 3 - payload without tag hash: {:02x?}", payload_hash.as_slice());
+        if let Ok(_) = public_key.verify_strict(&payload_hash, &signature) {
+            return Err("Wallet signed borsh payload without tag, not NEP-413 format".to_string());
+        }
+
+        eprintln!("    All alternatives failed, wallet may be using non-standard format");
+    }
+
     public_key
         .verify_strict(&message_hash, &signature)
         .map_err(|e| {

@@ -225,6 +225,36 @@ export default function Home() {
 
         console.log('  Extracted publicKey:', publicKey)
         console.log('  Extracted signature (first 40):', signature.substring(0, 40))
+        console.log('  Signature length:', signature.length)
+
+        // TEST: Verify if the wallet is doing NEP-413 correctly
+        // We'll manually construct what NEP-413 should sign and compare
+        console.log('🧪 Testing NEP-413 format...')
+
+        // According to NEP-413:
+        // 1. Serialize u32 tag (2^31 + 413 = 2147484061) as 4 bytes little-endian
+        // 2. Serialize Payload struct: {message, nonce, recipient}
+        // 3. Concatenate and SHA-256 hash
+        const NEP_413_TAG = 2147484061
+        const tagBytes = new Uint8Array(4)
+        const view = new DataView(tagBytes.buffer)
+        view.setUint32(0, NEP_413_TAG, true) // little-endian
+
+        console.log('  Tag (u32):', NEP_413_TAG)
+        console.log('  Tag bytes (hex):', Array.from(tagBytes).map(b => b.toString(16).padStart(2, '0')).join(''))
+
+        // For now, we can't easily borsh serialize in JS without a library
+        // But we can check if the wallet implementation matches what we expect
+
+        // Log what we're sending to TEE
+        console.log('📤 Sending to TEE:')
+        console.log('  account_id:', accountId)
+        console.log('  public_key:', publicKey)
+        console.log('  signature (base64):', signature.substring(0, 40) + '...')
+        console.log('  message:', 'Generate Nostr identity')
+        console.log('  nonce (base64):', nonceBase64)
+        console.log('  nonce (Uint8Array):', Array.from(nonceArray).map(b => b.toString(16).padStart(2, '0')).join(''))
+        console.log('  recipient:', 'nostr-identity.kampouse.testnet')
 
         // Store nonce for TEE
         setUsedNonce(nonceArray)
