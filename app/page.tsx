@@ -281,15 +281,17 @@ export default function Home() {
 
       if (!nep413) {
         console.log('⚠️ No NEP-413 signature - using mock data (dev mode, TEE verification disabled)')
+      }
 
-        // Generate a nonce anyway for the TEE
-        if (!nonceForTee) {
-          const nonceArray = new Uint8Array(32)
-          crypto.getRandomValues(nonceArray)
-          nonceForTee = nonceArray
-          setUsedNonce(nonceArray)
-        }
+      // Ensure we have a nonce for the TEE
+      if (!nonceForTee) {
+        const nonceArray = new Uint8Array(32)
+        crypto.getRandomValues(nonceArray)
+        nonceForTee = nonceArray
+        setUsedNonce(nonceArray)
+      }
 
+      if (!nep413) {
         // Create a mock nep413 response (TEE verification is disabled anyway)
         nep413 = {
           account_id: accountId,
@@ -526,9 +528,10 @@ export default function Home() {
         console.log('✅ Got passkey from conditional mediation')
       } catch (conditionalErr) {
         // User cancelled or no passkeys available
-        console.log('⚠️ Conditional mediation failed:', conditionalErr.name)
+        const errorName = conditionalErr instanceof Error ? conditionalErr.name : 'UnknownError'
+        console.log('⚠️ Conditional mediation failed:', errorName)
 
-        if (conditionalErr.name === 'NotAllowedError' || conditionalErr.name === 'NotFoundError') {
+        if (errorName === 'NotAllowedError' || errorName === 'NotFoundError') {
           // No passkeys exist - offer to create one
           setLoading(false)
           setShowRegisterPasskey(true)
