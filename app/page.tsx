@@ -259,6 +259,7 @@ export default function Home() {
           message: 'Generate Nostr identity',
           nonce: nonceBase64,
           recipient: 'nostr-identity.kampouse.testnet',
+          callbackUrl: authData.callbackUrl || null,
         },
       })
 
@@ -556,9 +557,10 @@ export default function Home() {
         public_key: nep413.public_key || nep413.publicKey,
         signature: nep413.signature,
         authRequest: {
-          message: nep413.message || 'Generate Nostr identity',
-          nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce,
-          recipient: 'nostr-identity.kampouse.testnet',
+          message: nep413.authRequest?.message || nep413.message || 'Generate Nostr identity',
+          nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce || nep413.authRequest?.nonce,
+          recipient: nep413.authRequest?.recipient || 'nostr-identity.kampouse.testnet',
+          callbackUrl: nep413.authRequest?.callbackUrl || null,
         },
       }
 

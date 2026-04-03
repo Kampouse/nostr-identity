@@ -173,6 +173,8 @@ pub struct Nep413AuthRequest {
     pub message: String,
     pub nonce: String,
     pub recipient: String,
+    #[serde(default, rename = "callbackUrl")]
+    pub callback_url: Option<String>,
 }
 
 /// NEP-413 Borsh payload — matches what wallets sign per NEP-413 spec
@@ -456,7 +458,7 @@ fn verify_nep413_ownership(
         message: nep413_response.auth_request.message.trim(), // Trim whitespace
         nonce: &nonce_array,                                  // Reference to fixed-size array
         recipient: &nep413_response.auth_request.recipient.trim(),
-        callback_url: None, // No callbackUrl for TEE use, but must be included
+        callback_url: nep413_response.auth_request.callback_url.as_deref(),
     };
     let payload_bytes =
         borsh::to_vec(&borsh_payload).map_err(|e| format!("Borsh serialization failed: {}", e))?;
@@ -489,6 +491,44 @@ fn verify_nep413_ownership(
 
     if nep413_result.is_err() {
         eprintln!("  ⚠️  NEP-413 verification failed, trying alternative formats...");
+
+        // Try 0: If callbackUrl was provided, try without it (and vice versa)
+        if nep413_response.auth_request.callback_url.is_some() {
+            let payload_no_cb = Nep413BorshPayload {
+                message: nep413_response.auth_request.message.trim(),
+                nonce: &nonce_array,
+                recipient: nep413_response.auth_request.recipient.trim(),
+                callback_url: None,
+            };
+            let payload_no_cb_bytes = borsh::to_vec(&payload_no_cb).map_err(|e| format!("Borsh: {}", e))?;
+            let mut prefixed_no_cb = vec![0u8; 4 + payload_no_cb_bytes.len()];
+            prefixed_no_cb[0..4].copy_from_slice(&NEP_413_TAG.to_le_bytes());
+            prefixed_no_cb[4..].copy_from_slice(&payload_no_cb_bytes);
+            let hash_no_cb = Sha256::digest(&prefixed_no_cb);
+            eprintln!("    Alt 0 - no callbackUrl hash: {:02x?}", hash_no_cb.as_slice());
+            if public_key.verify_strict(&hash_no_cb, &signature).is_ok() {
+                detected_format = "NEP-413 without callbackUrl".to_string();
+                found_match = true;
+            }
+        } else {
+            // No callbackUrl provided — try with empty string
+            let payload_empty_cb = Nep413BorshPayload {
+                message: nep413_response.auth_request.message.trim(),
+                nonce: &nonce_array,
+                recipient: nep413_response.auth_request.recipient.trim(),
+                callback_url: Some(""),
+            };
+            let payload_empty_cb_bytes = borsh::to_vec(&payload_empty_cb).map_err(|e| format!("Borsh: {}", e))?;
+            let mut prefixed_empty_cb = vec![0u8; 4 + payload_empty_cb_bytes.len()];
+            prefixed_empty_cb[0..4].copy_from_slice(&NEP_413_TAG.to_le_bytes());
+            prefixed_empty_cb[4..].copy_from_slice(&payload_empty_cb_bytes);
+            let hash_empty_cb = Sha256::digest(&prefixed_empty_cb);
+            eprintln!("    Alt 0b - empty callbackUrl hash: {:02x?}", hash_empty_cb.as_slice());
+            if public_key.verify_strict(&hash_empty_cb, &signature).is_ok() {
+                detected_format = "NEP-413 with empty callbackUrl".to_string();
+                found_match = true;
+            }
+        }
 
         // Try 1: Just the message string as UTF-8 bytes
         let message_bytes = nep413_response.auth_request.message.trim().as_bytes();
