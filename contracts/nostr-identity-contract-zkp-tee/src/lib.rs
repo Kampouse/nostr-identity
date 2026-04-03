@@ -1047,6 +1047,19 @@ pub enum Action {
         #[serde(skip_serializing_if = "Option::is_none")]
         signing_key: Option<String>,
     },
+
+    /// Test action — signs and submits a real transaction to NEAR, No NEP-413 verification needed.
+    /// Use to verify TEE can actually reach the NEAR blockchain.
+    #[serde(rename = "test_relayer")]
+    TestRelayer {
+        /// Account ID that has the signing key configured
+        account_id: String,
+        /// Writer contract to call
+        writer_contract_id: String,
+        /// Optional signing key override
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signing_key: Option<String>,
+    },
 }
 
 pub fn handle_action(action: Action) -> ActionResult {
@@ -1097,6 +1110,87 @@ pub fn handle_action(action: Action) -> ActionResult {
             deadline,
             signing_key,
         ),
+
+        Action::TestRelayer {
+            account_id,
+            writer_contract_id,
+            signing_key,
+        } => handle_test_relayer(account_id, writer_contract_id, signing_key),
+    }
+}
+
+fn handle_test_relayer(
+    account_id: String,
+    writer_contract_id: String,
+    signing_key: Option<String>,
+) -> ActionResult {
+    eprintln!("🧪 TEST RELAYER: Signing and submitting a tx without NEP-413");
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Call a simple view function on the writer contract
+    let args = serde_json::json!({
+        "account_id": account_id
+    });
+    let args_b64 = STANDARD.encode(args.to_string());
+
+    let actions = vec![
+        serde_json::json!({
+            "FunctionCall": {
+                "method_name": "get_identity",
+                "args": args_b64,
+                "gas": 30000000000000u64,
+                "deposit": "0",
+            }
+        })
+    ];
+
+    let signer_id = std::env::var("TEE_SIGNER_ID")
+        .unwrap_or_else(|_| "kampouse.testnet".to_string());
+
+    match sign_transaction_with_near_key(
+        signer_id.clone(),
+        writer_contract_id.clone(),
+        created_at * 1000,
+        actions,
+        signing_key,
+    ) {
+        Ok(signed_tx) => {
+            eprintln!("✅ Transaction signed successfully");
+            eprintln!("  Hash: {}", signed_tx.get("hash").unwrap_or(&serde_json::Value::Null));
+
+            match submit_transaction_to_near_rpc(&signed_tx) {
+                Ok(tx_hash) => {
+                    eprintln!("✅ Transaction submitted: {}", tx_hash);
+                    ActionResult {
+                        success: true,
+                        transaction_hash: Some(tx_hash),
+                        signed_transaction: Some(signed_tx),
+                        created_at: Some(created_at),
+                        ..Default::default()
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ RPC submission failed: {}", e);
+                    ActionResult {
+                        success: false,
+                        error: Some(format!("RPC failed: {}", e)),
+                        ..Default::default()
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Signing failed: {}", e);
+            ActionResult {
+                success: false,
+                error: Some(format!("Signing failed: {}", e)),
+                ..Default::default()
+            }
+        }
     }
 }
 
