@@ -21,6 +21,9 @@ name = "nostr_identity_zkp_tee"
 path = "src/lib.rs"
 
 [dependencies]
+# OutLayer storage SDK
+outlayer = "0.1"
+
 # Crypto
 ed25519-dalek = "2.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
