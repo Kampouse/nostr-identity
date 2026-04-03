@@ -262,28 +262,20 @@ pub struct Attestation {
 
 // OutLayer storage API (persistent across invocations)
 // Only available when built with `--features outlayer-tee`
-#[cfg(feature = "outlayer-tee")]
-extern "C" {
-    fn storage_get(key: *const u8, key_len: usize) -> *mut u8;
-    fn storage_set(key: *const u8, key_len: usize, value: *const u8, value_len: usize);
-    fn storage_len() -> usize;
-}
+// #[cfg(feature = "outlayer-tee")]
+// extern "C" {
+//     fn storage_get(key: *const u8, key_len: usize) -> *mut u8;
+//     fn storage_set(key: *const u8, key_len: usize, value: *const u8, value_len: usize);
+//     fn storage_len() -> usize;
+// }
 
 // Helper: Get from persistent storage
 fn tee_storage_get(key: &str) -> Option<String> {
-    #[cfg(feature = "outlayer-tee")]
-    {
-        let key_bytes = key.as_bytes();
-        unsafe {
-            let ptr = storage_get(key_bytes.as_ptr(), key_bytes.len());
-            if ptr.is_null() {
-                return None;
-            }
-            let len = storage_len();
-            let bytes = std::slice::from_raw_parts(ptr, len);
-            Some(String::from_utf8_lossy(bytes).to_string())
-        }
-    }
+    // #[cfg(feature = "outlayer-tee")]
+    // {
+    //     // WASI P2 doesn't provide storage functions - use smart contract instead
+    //     None
+    // }
 
     #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
@@ -300,24 +292,16 @@ fn tee_storage_get(key: &str) -> Option<String> {
         // No persistent storage in default mode
         None
     }
+
+    #[cfg(feature = "outlayer-tee")]
+    {
+        // WASI P2 doesn't provide storage functions - always query smart contract
+        None
+    }
 }
 
 // Helper: Set persistent storage
 fn tee_storage_set(key: &str, value: &str) {
-    #[cfg(feature = "outlayer-tee")]
-    {
-        let key_bytes = key.as_bytes();
-        let value_bytes = value.as_bytes();
-        unsafe {
-            storage_set(
-                key_bytes.as_ptr(),
-                key_bytes.len(),
-                value_bytes.as_ptr(),
-                value_bytes.len(),
-            );
-        }
-    }
-
     #[cfg(all(not(feature = "outlayer-tee"), feature = "local-test"))]
     {
         // File-backed storage for local testing
@@ -332,6 +316,12 @@ fn tee_storage_set(key: &str, value: &str) {
     #[cfg(all(not(feature = "outlayer-tee"), not(feature = "local-test")))]
     {
         // No persistent storage in default mode
+    }
+
+    #[cfg(feature = "outlayer-tee")]
+    {
+        // WASI P2 doesn't provide storage functions - store in smart contract instead
+        let _ = (key, value); // Suppress unused warnings
     }
 }
 
