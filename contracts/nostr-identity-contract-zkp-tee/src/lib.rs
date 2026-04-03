@@ -459,7 +459,44 @@ fn verify_nep413_ownership(
 
     public_key
         .verify_strict(&message_hash, &signature)
-        .map_err(|e| format!("Invalid signature: {}", e))?;
+        .map_err(|e| {
+            // Build detailed debug info for error response
+            let debug_details = format!(
+                "\n\n=== NEP-413 Verification Debug ===\n\
+                 Account ID: {}\n\
+                 Public Key: {}\n\
+                 Message: {}\n\
+                 Nonce (base64): {}\n\
+                 Nonce (hex): {:02x?}\n\
+                 Recipient: {}\n\
+                 Signature (hex): {:02x?}\n\
+                 NEP-413 Tag: {} (0x{:08x})\n\
+                 Tag Bytes (LE): {:02x?}\n\
+                 Payload (hex): {:02x?}\n\
+                 Payload Length: {} bytes\n\
+                 Full Prefixed Data (hex): {:02x?}\n\
+                 Total Length: {} bytes\n\
+                 Computed Hash (SHA256): {:02x?}\n\
+                 Error: {}",
+                account_id,
+                nep413_response.public_key,
+                nep413_response.auth_request.message,
+                nep413_response.auth_request.nonce,
+                nonce_raw.as_slice(),
+                nep413_response.auth_request.recipient,
+                sig_bytes.as_slice(),
+                NEP_413_TAG,
+                NEP_413_TAG,
+                NEP_413_TAG.to_le_bytes(),
+                payload_bytes.as_slice(),
+                payload_bytes.len(),
+                prefixed_bytes.as_slice(),
+                prefixed_bytes.len(),
+                message_hash.as_slice(),
+                e
+            );
+            format!("Invalid signature: {}", debug_details)
+        })?;
 
     // Mark nonce as used to prevent replay
     let nonce_key = format!("{}:{}", account_id, nep413_response.auth_request.nonce);
