@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "test_helper"
 path = "src/bin/test_helper.rs"
 
+[[bin]]
+name = "test_nep413_verify"
+path = "src/bin/test_nep413_verify.rs"
+
 [lib]
 name = "nostr_identity_zkp_tee"
 path = "src/lib.rs"

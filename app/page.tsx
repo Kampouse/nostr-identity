@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { NearConnector } from '@hot-labs/near-connect'
 import { encodeBech32, generateNostrKeypair } from '@nostr-identity/crypto'
 import { submitToRelayer } from './actions'
+import { AddRelayerKeyModal } from './components/AddRelayerKeyModal'
 let zkpWasm: any = null
 
 async function initZKP() {
@@ -91,6 +92,7 @@ export default function Home() {
   const [accountId, setAccountId] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [relayerKeyError, setRelayerKeyError] = useState('')
 
   const [identity, setIdentity] = useState<{
     npub: string
@@ -194,88 +196,73 @@ export default function Home() {
     setError('')
 
     try {
-      // Generate 32-byte nonce
-      const nonceArray = crypto.getRandomValues(new Uint8Array(32))
-      const nonceBase64 = btoa(String.fromCharCode(...nonceArray))
+      // Import near-sign-verify dynamically
+      const { sign, generateNonce } = await import('near-sign-verify')
 
-      console.log('📝 Requesting NEP-413 signature...')
+      console.log('📝 Requesting NEP-413 signature with near-sign-verify...')
       console.log('  Account:', accountId)
 
       // Get wallet instance
       const wallet = await connector.wallet()
 
-      // Check if wallet has signMessage method
-      if (typeof wallet?.signMessage === 'function') {
-        console.log('✅ Wallet has signMessage method')
+      console.log('✅ Using near-sign-verify for proper NEP-413 signing')
 
-        // Try the standard NEP-413 format first (what NEAR wallets expect)
-        const result = await wallet.signMessage({
+      // Use near-sign-verify to sign with proper NEP-413 format
+      // The library will generate the nonce for us
+      const authToken = await sign('Generate Nostr identity', {
+        signer: wallet, // Wallet that has signMessage method
+        recipient: 'nostr-identity.kampouse.testnet',
+        // Note: near-sign-verify will generate the nonce internally
+      })
+
+      console.log('✅ NEP-413 signed!')
+      console.log('  Auth token type:', typeof authToken)
+      console.log('  Auth token (first 50 chars):', String(authToken).substring(0, 50) + '...')
+
+      // Parse the auth token using near-sign-verify's parseAuthToken function
+      const { parseAuthToken } = await import('near-sign-verify')
+      const authData = parseAuthToken(authToken)
+
+      console.log('  Parsed authData:', JSON.stringify(authData, null, 2))
+
+      const signature = authData.signature
+      const publicKey = authData.publicKey
+
+      // Convert nonce array to base64 string
+      const nonceArray = new Uint8Array(authData.nonce)
+      const nonceBase64 = btoa(String.fromCharCode(...nonceArray))
+
+      console.log('  Extracted accountId:', authData.accountId)
+      console.log('  Extracted publicKey:', publicKey)
+      console.log('  Extracted nonce (array):', authData.nonce)
+      console.log('  Converted nonce (base64):', nonceBase64)
+      console.log('  Extracted signature (first 40):', signature.substring(0, 40))
+
+      console.log('📤 Sending to TEE:')
+      console.log('  account_id:', accountId)
+      console.log('  public_key:', publicKey)
+      console.log('  signature (base64):', signature.substring(0, 40) + '...')
+      console.log('  message:', 'Generate Nostr identity')
+      console.log('  nonce (base64):', nonceBase64)
+      console.log('  nonce (Uint8Array):', Array.from(nonceArray).map(b => b.toString(16).padStart(2, '0')).join(''))
+      console.log('  recipient:', 'nostr-identity.kampouse.testnet')
+
+      // Store nonce for TEE
+      setUsedNonce(nonceArray)
+
+      // Set the signedMessage with proper NEP-413 format
+      setSignedMessage({
+        account_id: accountId,
+        publicKey: publicKey,
+        signature: signature,
+        authRequest: {
           message: 'Generate Nostr identity',
-          nonce: nonceArray,
+          nonce: nonceBase64,
           recipient: 'nostr-identity.kampouse.testnet',
-        })
+        },
+      })
 
-        console.log('✅ Wallet signed successfully')
-        console.log('  Result keys:', Object.keys(result))
-        console.log('  Full result:', JSON.stringify(result, null, 2))
-
-        // Extract fields with different naming conventions
-        const publicKey = result.public_key || result.publicKey || ''
-        const signature = result.signature || ''
-
-        console.log('  Extracted publicKey:', publicKey)
-        console.log('  Extracted signature (first 40):', signature.substring(0, 40))
-        console.log('  Signature length:', signature.length)
-
-        // TEST: Verify if the wallet is doing NEP-413 correctly
-        // We'll manually construct what NEP-413 should sign and compare
-        console.log('🧪 Testing NEP-413 format...')
-
-        // According to NEP-413:
-        // 1. Serialize u32 tag (2^31 + 413 = 2147484061) as 4 bytes little-endian
-        // 2. Serialize Payload struct: {message, nonce, recipient}
-        // 3. Concatenate and SHA-256 hash
-        const NEP_413_TAG = 2147484061
-        const tagBytes = new Uint8Array(4)
-        const view = new DataView(tagBytes.buffer)
-        view.setUint32(0, NEP_413_TAG, true) // little-endian
-
-        console.log('  Tag (u32):', NEP_413_TAG)
-        console.log('  Tag bytes (hex):', Array.from(tagBytes).map(b => b.toString(16).padStart(2, '0')).join(''))
-
-        // For now, we can't easily borsh serialize in JS without a library
-        // But we can check if the wallet implementation matches what we expect
-
-        // Log what we're sending to TEE
-        console.log('📤 Sending to TEE:')
-        console.log('  account_id:', accountId)
-        console.log('  public_key:', publicKey)
-        console.log('  signature (base64):', signature.substring(0, 40) + '...')
-        console.log('  message:', 'Generate Nostr identity')
-        console.log('  nonce (base64):', nonceBase64)
-        console.log('  nonce (Uint8Array):', Array.from(nonceArray).map(b => b.toString(16).padStart(2, '0')).join(''))
-        console.log('  recipient:', 'nostr-identity.kampouse.testnet')
-
-        // Store nonce for TEE
-        setUsedNonce(nonceArray)
-
-        // Set the signedMessage - the wallet already did NEP-413 signing correctly
-        setSignedMessage({
-          account_id: accountId,
-          publicKey: publicKey,
-          signature: signature,
-          authRequest: {
-            message: 'Generate Nostr identity',
-            nonce: nonceBase64,
-            recipient: 'nostr-identity.kampouse.testnet',
-          },
-        })
-
-        console.log('✅ NEP-413 signature complete')
-      } else {
-        console.warn('⚠️ Wallet does not support signMessage method')
-        setError('Your wallet does not support message signing')
-      }
+      console.log('✅ Ready to send to TEE!')
     } catch (err: any) {
       console.error('❌ NEP-413 signing failed:')
       console.error('  Error:', err)
@@ -444,13 +431,14 @@ export default function Home() {
       console.log('  Account:', accountId)
       console.log('  Nonce (base64):', nonceBase64)
       console.log('  Message:', nep413.message || 'Generate Nostr identity')
-      console.log('  Original Recipient:', nep413.recipient)
+      console.log('  Original Recipient from authRequest:', nep413.authRequest?.recipient)
       console.log('  Public key:', nep413.publicKey)
       console.log('  Signature length:', nep413.signature.length)
 
-      // Override recipient to match TEE expectation
-      const recipient = 'nostr-identity.kampouse.testnet'
-      console.log('  Overridden Recipient:', recipient)
+      // IMPORTANT: Use the recipient from the signed authRequest
+      // This is what the wallet actually signed with
+      const recipient = nep413.authRequest?.recipient || 'nostr-identity.kampouse.testnet'
+      console.log('  Using recipient from signed authRequest:', recipient)
 
       console.log('  Full nep413Response we\'re sending:', JSON.stringify({
         account_id: accountId,
@@ -459,7 +447,7 @@ export default function Home() {
         authRequest: {
           message: nep413.message || 'Generate Nostr identity',
           nonce: nonceBase64,
-          recipient: 'nostr-identity.kampouse.testnet',
+          recipient: recipient,
         },
       }, null, 2))
       console.log('='.repeat(60))
@@ -597,7 +585,16 @@ export default function Home() {
       })
 
       if (!data.success) {
-        throw new Error(data.error || 'Failed to register identity')
+        const errorMsg = data.error || 'Failed to register identity'
+
+        // Check if this is the special "TEE relayer key missing" error
+        if (errorMsg.includes('TEE_RELAYER_KEY_MISSING:')) {
+          // Show modal to add relayer key
+          setRelayerKeyError(errorMsg)
+          return
+        }
+
+        throw new Error(errorMsg)
       }
 
       const npubBech32 = encodeBech32('npub', keypair.publicKeyHex)
@@ -1286,6 +1283,18 @@ export default function Home() {
             )}
           </div>
         </div>
+      )}
+
+      {/* Add Relayer Key Modal */}
+      {relayerKeyError && (
+        <AddRelayerKeyModal
+          error={relayerKeyError}
+          onRetry={async () => {
+            setRelayerKeyError('')
+            await generateIdentity()
+          }}
+          onClose={() => setRelayerKeyError('')}
+        />
       )}
 
       {/* Footer */}

@@ -3,7 +3,7 @@
 // OutLayer HTTPS API: POST https://api.outlayer.fastnear.com/call/{owner}/{project}
 // TEE WASM reads JSON from stdin, returns JSON on stdout
 const OUTLAYER_API = 'https://api.outlayer.fastnear.com/call'
-const OUTLAYER_PROJECT = process.env.OUTLAYER_PROJECT_ID || 'kampouse.near/nostr-identity-zkp-tee'
+const OUTLAYER_PROJECT = process.env.OUTLAYER_PROJECT_ID || 'kampouse.near/nostr-identity-zkp-tee-v5'
 const PAYMENT_KEY = process.env.OUTLAYER_PAYMENT_KEY || ''
 
 // Secrets ref for TEE to access encrypted NEAR signing key

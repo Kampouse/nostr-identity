@@ -12,6 +12,14 @@ local-test = ["minreq"]
 name = "nostr-identity-zkp-tee"
 path = "contracts/nostr-identity-contract-zkp-tee/src/main.rs"
 
+[[bin]]
+name = "test_nep413_verify"
+path = "contracts/nostr-identity-contract-zkp-tee/src/bin/test_nep413_verify.rs"
+
+[[bin]]
+name = "test_borsh_array_ref"
+path = "test-borsh-array-ref.rs"
+
 [lib]
 name = "nostr_identity_zkp_tee"
 path = "contracts/nostr-identity-contract-zkp-tee/src/lib.rs"

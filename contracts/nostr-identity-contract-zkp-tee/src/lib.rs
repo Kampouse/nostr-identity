@@ -1,10 +1,13 @@
 use ark_bn254::{Bn254, Fr};
 use ark_crypto_primitives::snark::SNARK;
-use ark_ff::{PrimeField, One};
+use ark_ff::{One, PrimeField};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, LinearCombination, Variable};
-use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
+};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 /// Fixed base point for algebraic commitment (must match client circuit)
 use ed25519_dalek::{Signature, VerifyingKey as Ed25519VerifyingKey};
 use k256::ecdsa::SigningKey;
@@ -12,7 +15,6 @@ use rand::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashMap;
-use base64::{engine::general_purpose::STANDARD, Engine};
 
 // ============================================================================
 // ZKP CIRCUIT - Production version with proper constraints
@@ -33,31 +35,22 @@ struct NEAROwnershipCircuit {
 }
 
 impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<Fr>,
-    ) -> Result<(), SynthesisError> {
-        let account_id_var = cs.new_witness_variable(|| {
-            self.account_id.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        let nsec_var = cs.new_witness_variable(|| {
-            self.nsec.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        let nonce_var = cs.new_witness_variable(|| {
-            self.nonce.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        let commitment_var = cs.new_input_variable(|| {
-            self.commitment.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        let nullifier_var = cs.new_input_variable(|| {
-            self.nullifier.ok_or(SynthesisError::AssignmentMissing)
-        })?;
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let account_id_var =
+            cs.new_witness_variable(|| self.account_id.ok_or(SynthesisError::AssignmentMissing))?;
+        let nsec_var =
+            cs.new_witness_variable(|| self.nsec.ok_or(SynthesisError::AssignmentMissing))?;
+        let nonce_var =
+            cs.new_witness_variable(|| self.nonce.ok_or(SynthesisError::AssignmentMissing))?;
+        let commitment_var =
+            cs.new_input_variable(|| self.commitment.ok_or(SynthesisError::AssignmentMissing))?;
+        let nullifier_var =
+            cs.new_input_variable(|| self.nullifier.ok_or(SynthesisError::AssignmentMissing))?;
 
         let base = Fr::from(COMMITMENT_BASE);
 
-        let nsec_times_base = cs.new_witness_variable(|| {
-            Ok(self.nsec.unwrap_or_default() * base)
-        })?;
+        let nsec_times_base =
+            cs.new_witness_variable(|| Ok(self.nsec.unwrap_or_default() * base))?;
         cs.enforce_constraint(
             LinearCombination::zero() + nsec_var,
             LinearCombination::zero() + (base, Variable::One),
@@ -74,14 +67,14 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
         )?;
 
         cs.enforce_constraint(
-            LinearCombination::zero() + (Fr::one(), commitment_computed) - (Fr::one(), commitment_var),
+            LinearCombination::zero() + (Fr::one(), commitment_computed)
+                - (Fr::one(), commitment_var),
             LinearCombination::zero() + (Fr::one(), Variable::One),
             LinearCombination::zero(),
         )?;
 
-        let nonce_times_base = cs.new_witness_variable(|| {
-            Ok(self.nonce.unwrap_or_default() * base)
-        })?;
+        let nonce_times_base =
+            cs.new_witness_variable(|| Ok(self.nonce.unwrap_or_default() * base))?;
         cs.enforce_constraint(
             LinearCombination::zero() + nonce_var,
             LinearCombination::zero() + (base, Variable::One),
@@ -98,7 +91,8 @@ impl ConstraintSynthesizer<Fr> for NEAROwnershipCircuit {
         )?;
 
         cs.enforce_constraint(
-            LinearCombination::zero() + (Fr::one(), nullifier_computed) - (Fr::one(), nullifier_var),
+            LinearCombination::zero() + (Fr::one(), nullifier_computed)
+                - (Fr::one(), nullifier_var),
             LinearCombination::zero() + (Fr::one(), Variable::One),
             LinearCombination::zero(),
         )?;
@@ -128,7 +122,10 @@ fn get_or_create_salt() -> String {
 
     // Try persistent TEE storage
     if let Some(salt) = tee_storage_get("account_hash_salt") {
-        get_account_hash_salt().lock().unwrap().replace(salt.clone());
+        get_account_hash_salt()
+            .lock()
+            .unwrap()
+            .replace(salt.clone());
         return salt;
     }
 
@@ -141,7 +138,10 @@ fn get_or_create_salt() -> String {
     tee_storage_set("account_hash_salt", &salt);
 
     // Cache in memory
-    get_account_hash_salt().lock().unwrap().replace(salt.clone());
+    get_account_hash_salt()
+        .lock()
+        .unwrap()
+        .replace(salt.clone());
 
     salt
 }
@@ -168,7 +168,7 @@ pub struct Nep413AuthResponse {
     pub auth_request: Nep413AuthRequest,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Nep413AuthRequest {
     pub message: String,
     pub nonce: String,
@@ -176,12 +176,14 @@ pub struct Nep413AuthRequest {
 }
 
 /// NEP-413 Borsh payload — matches what wallets sign per NEP-413 spec
+/// Per NEP-413, callbackUrl is optional but MUST be included in serialization
+/// IMPORTANT: nonce must be exactly 32 bytes (fixed-size array), not a slice
 #[derive(borsh::BorshSerialize)]
 struct Nep413BorshPayload<'a> {
     message: &'a str,
-    nonce: &'a [u8],
+    nonce: &'a [u8; 32], // Fixed-size array, not slice!
     recipient: &'a str,
-    // Note: callbackUrl is optional, omitted for TEE use
+    callback_url: Option<&'a str>, // MUST be included, even if None
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -379,7 +381,10 @@ fn verify_nep413_ownership(
     }
 
     if nep413_response.auth_request.recipient != "nostr-identity.kampouse.testnet" {
-        return Err(format!("Invalid recipient: expected 'nostr-identity.kampouse.testnet', got '{}'", nep413_response.auth_request.recipient));
+        return Err(format!(
+            "Invalid recipient: expected 'nostr-identity.kampouse.testnet', got '{}'",
+            nep413_response.auth_request.recipient
+        ));
     }
 
     // Replay protection: check nonce hasn't been used
@@ -401,23 +406,31 @@ fn verify_nep413_ownership(
     }
 
     let signature = Signature::from_bytes(
-        sig_bytes.as_slice().try_into()
+        sig_bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| "Invalid signature bytes")?,
     );
 
     let pk_bytes = parse_public_key(&nep413_response.public_key)?;
-    
+
     let public_key = Ed25519VerifyingKey::from_bytes(
-        pk_bytes.as_slice().try_into()
+        pk_bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| "Invalid public key bytes")?,
-    ).map_err(|e| format!("Invalid public key: {}", e))?;
+    )
+    .map_err(|e| format!("Invalid public key: {}", e))?;
 
     // NEP-413 spec: wallet signs SHA-256 of (u32 prefix + borsh payload)
     // u32 prefix: 2^31 + 413 = 2147484061 (little-endian bytes)
     // Payload: { message, nonce (raw 32 bytes), recipient }
     // The nonce from the frontend is base64-encoded raw bytes — decode first
-    let nonce_raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &nep413_response.auth_request.nonce)
-        .map_err(|e| format!("Invalid nonce base64: {}", e))?;
+    let nonce_raw = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &nep413_response.auth_request.nonce,
+    )
+    .map_err(|e| format!("Invalid nonce base64: {}", e))?;
 
     // Debug logging
     eprintln!("🔍 TEE NEP-413 Verification:");
@@ -433,13 +446,20 @@ fn verify_nep413_ownership(
     // NEP-413 spec: prefix with u32 tag (2^31 + 413 = 2147484061)
     const NEP_413_TAG: u32 = 2147484061u32;
 
+    // Convert nonce slice to fixed-size array
+    let nonce_array: [u8; 32] = nonce_raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("Nonce must be exactly 32 bytes, got {}", nonce_raw.len()))?;
+
     let borsh_payload = Nep413BorshPayload {
-        message: &nep413_response.auth_request.message,
-        nonce: &nonce_raw,
-        recipient: &nep413_response.auth_request.recipient,
+        message: nep413_response.auth_request.message.trim(), // Trim whitespace
+        nonce: &nonce_array,                                  // Reference to fixed-size array
+        recipient: &nep413_response.auth_request.recipient.trim(),
+        callback_url: None, // No callbackUrl for TEE use, but must be included
     };
-    let payload_bytes = borsh::to_vec(&borsh_payload)
-        .map_err(|e| format!("Borsh serialization failed: {}", e))?;
+    let payload_bytes =
+        borsh::to_vec(&borsh_payload).map_err(|e| format!("Borsh serialization failed: {}", e))?;
 
     // Prepend the u32 tag prefix as per NEP-413 spec
     let mut prefixed_bytes = vec![0u8; 4 + payload_bytes.len()];
@@ -447,7 +467,10 @@ fn verify_nep413_ownership(
     prefixed_bytes[4..].copy_from_slice(&payload_bytes);
 
     eprintln!("  Verification:");
-    eprintln!("    nep413 tag (u32): {} (0x{:08x})", NEP_413_TAG, NEP_413_TAG);
+    eprintln!(
+        "    nep413 tag (u32): {} (0x{:08x})",
+        NEP_413_TAG, NEP_413_TAG
+    );
     eprintln!("    tag bytes (le): {:02x?}", &NEP_413_TAG.to_le_bytes());
     eprintln!("    payload (hex): {:02x?}", payload_bytes.as_slice());
     eprintln!("    payload length: {} bytes", payload_bytes.len());
@@ -461,35 +484,75 @@ fn verify_nep413_ownership(
     let nep413_result = public_key.verify_strict(&message_hash, &signature);
 
     // If that fails, try just the message bytes (some wallets might not do NEP-413)
+    let mut detected_format = "NEP-413 (tag + borsh payload)".to_string();
+    let mut found_match = false;
+
     if nep413_result.is_err() {
         eprintln!("  ⚠️  NEP-413 verification failed, trying alternative formats...");
 
         // Try 1: Just the message string as UTF-8 bytes
-        let message_bytes = nep413_response.auth_request.message.as_bytes();
+        let message_bytes = nep413_response.auth_request.message.trim().as_bytes();
         let message_hash_alt = Sha256::digest(message_bytes);
-        eprintln!("    Alt 1 - message only hash: {:02x?}", message_hash_alt.as_slice());
-        if let Ok(_) = public_key.verify_strict(&message_hash_alt, &signature) {
-            return Err("Wallet signed plain message, not NEP-413 format".to_string());
+        eprintln!(
+            "    Alt 1 - message only hash: {:02x?}",
+            message_hash_alt.as_slice()
+        );
+        if public_key
+            .verify_strict(&message_hash_alt, &signature)
+            .is_ok()
+        {
+            detected_format = "Plain message only (NOT NEP-413!)".to_string();
+            found_match = true;
         }
 
-        // Try 2: Message + nonce concatenated
-        let mut msg_with_nonce = Vec::new();
-        msg_with_nonce.extend_from_slice(message_bytes);
-        msg_with_nonce.extend_from_slice(&nonce_raw);
-        let msg_with_nonce_hash = Sha256::digest(&msg_with_nonce);
-        eprintln!("    Alt 2 - message+nonce hash: {:02x?}", msg_with_nonce_hash.as_slice());
-        if let Ok(_) = public_key.verify_strict(&msg_with_nonce_hash, &signature) {
-            return Err("Wallet signed message+nonce, not NEP-413 format".to_string());
+        // Try 2: JSON string of the authRequest
+        if !found_match {
+            let json_str = serde_json::to_string(&nep413_response.auth_request).unwrap_or_default();
+            let json_hash = Sha256::digest(json_str.as_bytes());
+            eprintln!("    Alt 2 - JSON hash: {:02x?}", json_hash.as_slice());
+            eprintln!("    Alt 2 - JSON string: {}", json_str);
+            if public_key.verify_strict(&json_hash, &signature).is_ok() {
+                detected_format = "JSON string of authRequest (NOT NEP-413!)".to_string();
+                found_match = true;
+            }
         }
 
-        // Try 3: Borsh payload without tag prefix
-        let payload_hash = Sha256::digest(&payload_bytes);
-        eprintln!("    Alt 3 - payload without tag hash: {:02x?}", payload_hash.as_slice());
-        if let Ok(_) = public_key.verify_strict(&payload_hash, &signature) {
-            return Err("Wallet signed borsh payload without tag, not NEP-413 format".to_string());
+        // Try 3: Message + nonce concatenated
+        if !found_match {
+            let mut msg_with_nonce = Vec::new();
+            msg_with_nonce.extend_from_slice(message_bytes);
+            msg_with_nonce.extend_from_slice(&nonce_raw);
+            let msg_with_nonce_hash = Sha256::digest(&msg_with_nonce);
+            eprintln!(
+                "    Alt 3 - message+nonce hash: {:02x?}",
+                msg_with_nonce_hash.as_slice()
+            );
+            if public_key
+                .verify_strict(&msg_with_nonce_hash, &signature)
+                .is_ok()
+            {
+                detected_format = "Message + nonce concatenated (NOT NEP-413!)".to_string();
+                found_match = true;
+            }
         }
 
-        eprintln!("    All alternatives failed, wallet may be using non-standard format");
+        // Try 4: Borsh payload without tag prefix
+        if !found_match {
+            let payload_hash = Sha256::digest(&payload_bytes);
+            eprintln!(
+                "    Alt 4 - payload without tag hash: {:02x?}",
+                payload_hash.as_slice()
+            );
+            if public_key.verify_strict(&payload_hash, &signature).is_ok() {
+                detected_format = "Borsh payload without tag (NOT NEP-413!)".to_string();
+                found_match = true;
+            }
+        }
+
+        if !found_match {
+            detected_format = "Unknown/Non-standard format".to_string();
+        }
+        eprintln!("    Detected format: {}", detected_format);
     }
 
     public_key
@@ -512,7 +575,12 @@ fn verify_nep413_ownership(
                  Full Prefixed Data (hex): {:02x?}\n\
                  Total Length: {} bytes\n\
                  Computed Hash (SHA256): {:02x?}\n\
-                 Error: {}",
+                 \n\
+                 ⚠️  WALLET FORMAT DETECTION:\n\
+                 Wallet appears to be signing: {}\n\
+                 Expected NEP-413 format: tag + borsh(payload)\n\
+                 \n\
+                 Verification Error: {}",
                 account_id,
                 nep413_response.public_key,
                 nep413_response.auth_request.message,
@@ -528,6 +596,7 @@ fn verify_nep413_ownership(
                 prefixed_bytes.as_slice(),
                 prefixed_bytes.len(),
                 message_hash.as_slice(),
+                detected_format,
                 e
             );
             format!("Invalid signature: {}", debug_details)
@@ -575,14 +644,23 @@ fn verify_account_key_ownership(account_id: &str, public_key: &str) -> Result<()
 
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response_body) {
         if let Some(error) = parsed.get("error") {
-            return Err(format!("RPC error: {}", error["message"].as_str().unwrap_or("unknown")));
+            return Err(format!(
+                "RPC error: {}",
+                error["message"].as_str().unwrap_or("unknown")
+            ));
         }
         if let Some(keys) = parsed["result"]["keys"].as_array() {
             let found = keys.iter().any(|k| {
-                k["public_key"].as_str().map(|pk| pk == public_key).unwrap_or(false)
+                k["public_key"]
+                    .as_str()
+                    .map(|pk| pk == public_key)
+                    .unwrap_or(false)
             });
             if !found {
-                return Err(format!("{} is not an access key for {}", public_key, account_id));
+                return Err(format!(
+                    "{} is not an access key for {}",
+                    public_key, account_id
+                ));
             }
             return Ok(());
         }
@@ -614,7 +692,9 @@ fn fetch_rpc(url: &str, body: &str) -> Result<String, String> {
             .body(body.as_bytes())
             .send()
             .map_err(|e| format!("wasi-http-client error: {:?}", e))?;
-        let body_bytes = resp.body().map_err(|e| format!("body read error: {:?}", e))?;
+        let body_bytes = resp
+            .body()
+            .map_err(|e| format!("body read error: {:?}", e))?;
         Ok(String::from_utf8_lossy(&body_bytes).to_string())
     }
 }
@@ -647,8 +727,7 @@ const SHARED_VK_HEX: &str = "1606ca9cc25428ee3469315117bd5d318bcccafaeecfb372e10
 
 /// Load the shared verifying key from the hardcoded constant.
 fn load_shared_vk() -> Result<VerifyingKey<Bn254>, String> {
-    let vk_bytes = hex::decode(SHARED_VK_HEX)
-        .map_err(|e| format!("Invalid VK hex: {}", e))?;
+    let vk_bytes = hex::decode(SHARED_VK_HEX).map_err(|e| format!("Invalid VK hex: {}", e))?;
     CanonicalDeserialize::deserialize_compressed(&vk_bytes[..])
         .map_err(|e| format!("VK deserialization failed: {}", e))
 }
@@ -673,18 +752,18 @@ fn get_cached_vk() -> Result<VerifyingKey<Bn254>, String> {
 
 fn initialize_zkp() -> Result<(), String> {
     let mut pk_lock = get_proving_key().lock().unwrap();
-    
+
     if pk_lock.is_some() {
         return Ok(());
     }
-    
+
     // Proving key must be generated at runtime (not shared — only TEE proves)
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
     let base = Fr::from(COMMITMENT_BASE);
     let init_aid = Fr::from(1u64);
     let init_nsec = Fr::from(2u64);
     let init_nonce = Fr::from(3u64);
-    
+
     let circuit = NEAROwnershipCircuit {
         account_id: Some(init_aid),
         nsec: Some(init_nsec),
@@ -692,39 +771,34 @@ fn initialize_zkp() -> Result<(), String> {
         commitment: Some(init_aid + init_nsec * base),
         nullifier: Some(init_nsec + init_nonce * base),
     };
-    
+
     let (pk, _vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| format!("Failed to generate ZKP keys: {}", e))?;
-    
+
     *pk_lock = Some(pk);
-    
+
     // VK is loaded from hardcoded constant (see get_cached_vk)
     // Ensure it's cached
     get_cached_vk()?;
-    
+
     Ok(())
 }
 
-fn generate_real_zkp(
-    account_id: &str,
-    nonce: &str,
-    verified: bool,
-) -> Result<ZKPProof, String> {
+fn generate_real_zkp(account_id: &str, nonce: &str, verified: bool) -> Result<ZKPProof, String> {
     initialize_zkp()?;
-    
+
     let pk_lock = get_proving_key().lock().unwrap();
-    let pk = pk_lock.as_ref()
-        .ok_or("ZKP not initialized")?;
-    
+    let pk = pk_lock.as_ref().ok_or("ZKP not initialized")?;
+
     // Convert to field elements
     let account_id_field = Fr::from_le_bytes_mod_order(account_id.as_bytes());
     let nonce_field = Fr::from_le_bytes_mod_order(nonce.as_bytes());
     let nsec_field = Fr::from(0u64); // TEE doesn't have nsec, uses 0
-    
+
     let base = Fr::from(COMMITMENT_BASE);
     let commitment_field = account_id_field + nsec_field * base;
     let nullifier_field = nsec_field + nonce_field * base;
-    
+
     let circuit = NEAROwnershipCircuit {
         account_id: Some(account_id_field),
         nsec: Some(nsec_field),
@@ -732,32 +806,38 @@ fn generate_real_zkp(
         commitment: Some(commitment_field),
         nullifier: Some(nullifier_field),
     };
-    
+
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x4e4541525a4b5031);
     let proof = Groth16::<Bn254>::prove(pk, circuit, &mut rng)
         .map_err(|e| format!("Failed to generate ZKP: {}", e))?;
-    
+
     let mut proof_bytes = Vec::new();
-    proof.serialize_uncompressed(&mut proof_bytes)
+    proof
+        .serialize_uncompressed(&mut proof_bytes)
         .map_err(|e| format!("Failed to serialize proof: {}", e))?;
-    
+
     // Output field elements as hex for public inputs
     let mut commitment_bytes = [0u8; 32];
-    commitment_field.serialize_compressed(&mut commitment_bytes[..])
+    commitment_field
+        .serialize_compressed(&mut commitment_bytes[..])
         .map_err(|e| format!("Failed to serialize commitment: {}", e))?;
-    
+
     let mut nullifier_bytes = [0u8; 32];
-    nullifier_field.serialize_compressed(&mut nullifier_bytes[..])
+    nullifier_field
+        .serialize_compressed(&mut nullifier_bytes[..])
         .map_err(|e| format!("Failed to serialize nullifier: {}", e))?;
-    
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     Ok(ZKPProof {
         proof: STANDARD.encode(&proof_bytes),
-        public_inputs: vec![hex::encode(&commitment_bytes), hex::encode(&nullifier_bytes)],
+        public_inputs: vec![
+            hex::encode(&commitment_bytes),
+            hex::encode(&nullifier_bytes),
+        ],
         verified,
         timestamp,
     })
@@ -794,7 +874,7 @@ fn is_commitment_used(commitment: &str) -> bool {
     if tee_storage_get(&format!("commitment:{}", commitment)).is_some() {
         return true;
     }
-    
+
     // Fallback to in-memory
     let commitments = get_commitments().lock().unwrap();
     commitments.contains_key(commitment)
@@ -811,12 +891,24 @@ fn store_identity(commitment: &str, nullifier: &str, npub: &str, created_at: u64
     // Store in TEE persistent storage
     tee_storage_set(&format!("commitment:{}", commitment), npub);
     tee_storage_set(&format!("nullifier:{}", nullifier), npub);
-    tee_storage_set(&format!("npub:{}", npub), &serde_json::to_string(&info).unwrap());
+    tee_storage_set(
+        &format!("npub:{}", npub),
+        &serde_json::to_string(&info).unwrap(),
+    );
 
     // Also store in memory for fast access
-    get_commitments().lock().unwrap().insert(commitment.to_string(), npub.to_string());
-    get_nullifiers().lock().unwrap().insert(nullifier.to_string(), npub.to_string());
-    get_identities().lock().unwrap().insert(npub.to_string(), info);
+    get_commitments()
+        .lock()
+        .unwrap()
+        .insert(commitment.to_string(), npub.to_string());
+    get_nullifiers()
+        .lock()
+        .unwrap()
+        .insert(nullifier.to_string(), npub.to_string());
+    get_identities()
+        .lock()
+        .unwrap()
+        .insert(npub.to_string(), info);
 }
 
 fn generate_attestation() -> Attestation {
@@ -862,20 +954,13 @@ pub enum Action {
         nep413_response: Nep413AuthResponse,
     },
     #[serde(rename = "verify")]
-    Verify {
-        zkp_proof: ZKPProof,
-    },
+    Verify { zkp_proof: ZKPProof },
     #[serde(rename = "get_identity")]
-    GetIdentity {
-        npub: String,
-    },
+    GetIdentity { npub: String },
     #[serde(rename = "check_commitment")]
-    CheckCommitment {
-        commitment: String,
-    },
+    CheckCommitment { commitment: String },
     #[serde(rename = "stats")]
     Stats,
-    
 
     #[serde(rename = "register_via_contract")]
     RegisterViaContract {
@@ -884,7 +969,7 @@ pub enum Action {
         contract_id: String,
         nonce: u64,
     },
-    
+
     /// Prepare a writer contract call - returns transaction payload for signing
     #[serde(rename = "prepare_writer_call")]
     PrepareWriterCall {
@@ -893,7 +978,7 @@ pub enum Action {
         writer_contract_id: String,
         deadline: u64,
     },
-    
+
     /// Register with client-generated ZKP + NEP-413 auth.
     ///
     /// Flow:
@@ -921,57 +1006,40 @@ pub enum Action {
         /// Optional signing key (TESTING ONLY - INSECURE)
         #[serde(skip_serializing_if = "Option::is_none")]
         signing_key: Option<String>,
-    },}
+    },
+}
 
 pub fn handle_action(action: Action) -> ActionResult {
     match action {
-        Action::Generate { account_id, nep413_response, writer_contract_id, signing_key } => {
-            handle_generate(account_id, nep413_response, writer_contract_id, signing_key)
-        }
-        Action::Recover { account_id, nep413_response } => {
-            handle_recover(account_id, nep413_response)
-        }
-        Action::Verify { zkp_proof } => {
-            handle_verify_zkp(zkp_proof)
-        }
-        Action::GetIdentity { npub } => {
-            handle_get_identity(npub)
-        }
-        Action::CheckCommitment { commitment } => {
-            handle_check_commitment(commitment)
-        }
-        Action::Stats => {
-            handle_stats()
-        }
-        
-        Action::RegisterViaContract { 
-            account_id, 
-            nep413_response, 
+        Action::Generate {
+            account_id,
+            nep413_response,
+            writer_contract_id,
+            signing_key,
+        } => handle_generate(account_id, nep413_response, writer_contract_id, signing_key),
+        Action::Recover {
+            account_id,
+            nep413_response,
+        } => handle_recover(account_id, nep413_response),
+        Action::Verify { zkp_proof } => handle_verify_zkp(zkp_proof),
+        Action::GetIdentity { npub } => handle_get_identity(npub),
+        Action::CheckCommitment { commitment } => handle_check_commitment(commitment),
+        Action::Stats => handle_stats(),
+
+        Action::RegisterViaContract {
+            account_id,
+            nep413_response,
             contract_id,
             nonce,
-        } => {
-            handle_register_via_contract(
-                account_id,
-                nep413_response,
-                contract_id,
-                nonce,
-            )
-        }
-        
+        } => handle_register_via_contract(account_id, nep413_response, contract_id, nonce),
+
         Action::PrepareWriterCall {
             account_id,
             nep413_response,
             writer_contract_id,
             deadline,
-        } => {
-            handle_prepare_writer_call(
-                account_id,
-                nep413_response,
-                writer_contract_id,
-                deadline,
-            )
-        }
-        
+        } => handle_prepare_writer_call(account_id, nep413_response, writer_contract_id, deadline),
+
         Action::RegisterWithZkp {
             zkp_proof,
             npub,
@@ -980,17 +1048,15 @@ pub fn handle_action(action: Action) -> ActionResult {
             writer_contract_id,
             deadline,
             signing_key,
-        } => {
-            handle_register_with_zkp(
-                zkp_proof,
-                npub,
-                account_id,
-                nep413_response,
-                writer_contract_id,
-                deadline,
-                signing_key,
-            )
-        }
+        } => handle_register_with_zkp(
+            zkp_proof,
+            npub,
+            account_id,
+            nep413_response,
+            writer_contract_id,
+            deadline,
+            signing_key,
+        ),
     }
 }
 
@@ -1021,11 +1087,8 @@ fn handle_generate(
     }
 
     // 2. Generate ZKP
-    let zkp_proof = match generate_real_zkp(
-        &account_id,
-        &nep413_response.auth_request.nonce,
-        true,
-    ) {
+    let zkp_proof = match generate_real_zkp(&account_id, &nep413_response.auth_request.nonce, true)
+    {
         Ok(proof) => proof,
         Err(e) => {
             return ActionResult {
@@ -1075,16 +1138,14 @@ fn handle_generate(
 
     let tx_nonce = created_at * 1000;
 
-    let actions = vec![
-        serde_json::json!({
-            "FunctionCall": {
-                "method_name": "register",
-                "args": args_b64,
-                "gas": 300000000000000u64,
-                "deposit": "0",
-            }
-        })
-    ];
+    let actions = vec![serde_json::json!({
+        "FunctionCall": {
+            "method_name": "register",
+            "args": args_b64,
+            "gas": 300000000000000u64,
+            "deposit": "0",
+        }
+    })];
 
     let signed_tx = match sign_transaction_with_near_key(
         std::env::var("TEE_SIGNER_ID").unwrap_or_else(|_| "kampouse.testnet".to_string()),
@@ -1109,7 +1170,7 @@ fn handle_generate(
         Err(e) => {
             return ActionResult {
                 success: false,
-                error: Some(format!("Failed to submit transaction: {}", e)),
+                error: Some(format!("Failed   st uff to submit transaction: {}", e)),
                 ..Default::default()
             }
         }
@@ -1146,7 +1207,7 @@ fn handle_get_identity(npub: String) -> ActionResult {
             };
         }
     }
-    
+
     // Try TEE storage (persistent)
     if let Some(json) = tee_storage_get(&format!("npub:{}", npub)) {
         if let Ok(info) = serde_json::from_str::<IdentityInfo>(&json) {
@@ -1158,7 +1219,7 @@ fn handle_get_identity(npub: String) -> ActionResult {
             };
         }
     }
-    
+
     ActionResult {
         success: false,
         error: Some("Identity not found".to_string()),
@@ -1176,14 +1237,14 @@ fn handle_recover(account_id: String, nep413_response: Nep413AuthResponse) -> Ac
             ..Default::default()
         };
     }
-    
+
     // 2. Compute commitment
     let commitment = {
         let input = format!("commitment:{}", account_id);
         let hash = compute_sha256(&input);
         hex::encode(&hash)
     };
-    
+
     // 3. Check if identity exists
     let npub = if let Some(npub) = tee_storage_get(&format!("commitment:{}", commitment)) {
         npub
@@ -1200,7 +1261,7 @@ fn handle_recover(account_id: String, nep413_response: Nep413AuthResponse) -> Ac
             }
         }
     };
-    
+
     // 4. Get full identity info
     if let Some(json) = tee_storage_get(&format!("npub:{}", npub)) {
         if let Ok(info) = serde_json::from_str::<IdentityInfo>(&json) {
@@ -1221,7 +1282,7 @@ fn handle_recover(account_id: String, nep413_response: Nep413AuthResponse) -> Ac
             };
         }
     }
-    
+
     ActionResult {
         success: false,
         error: Some("Failed to retrieve identity".to_string()),
@@ -1240,7 +1301,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             ..Default::default()
         };
     }
-    
+
     if zkp_proof.public_inputs.len() != 2 {
         return ActionResult {
             success: false,
@@ -1249,7 +1310,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             ..Default::default()
         };
     }
-    
+
     // Initialize ZKP system if needed
     if let Err(e) = initialize_zkp() {
         return ActionResult {
@@ -1259,7 +1320,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             ..Default::default()
         };
     }
-    
+
     // Deserialize the proof
     let proof_bytes = match STANDARD.decode(&zkp_proof.proof) {
         Ok(bytes) => bytes,
@@ -1272,7 +1333,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             };
         }
     };
-    
+
     let proof = match ark_groth16::Proof::<Bn254>::deserialize_compressed(&proof_bytes[..]) {
         Ok(p) => p,
         Err(_) => match ark_groth16::Proof::<Bn254>::deserialize_uncompressed(&proof_bytes[..]) {
@@ -1285,13 +1346,13 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
                     ..Default::default()
                 };
             }
-        }
+        },
     };
-    
+
     // Parse public inputs (commitment and nullifier)
     let commitment_str = &zkp_proof.public_inputs[0];
     let nullifier_str = &zkp_proof.public_inputs[1];
-    
+
     let commitment_bytes = match hex::decode(commitment_str) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -1303,7 +1364,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             };
         }
     };
-    
+
     let nullifier_bytes = match hex::decode(nullifier_str) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -1315,11 +1376,11 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             };
         }
     };
-    
+
     // Convert to field elements
     let commitment_fr = Fr::from_le_bytes_mod_order(&commitment_bytes);
     let nullifier_fr = Fr::from_le_bytes_mod_order(&nullifier_bytes);
-    
+
     // Get verifying key from hardcoded constant
     let vk = match get_cached_vk() {
         Ok(vk) => vk,
@@ -1332,13 +1393,13 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
             };
         }
     };
-    
+
     // Verify the Groth16 proof
     let public_inputs = vec![commitment_fr, nullifier_fr];
-    
+
     let is_valid = Groth16::<Bn254>::verify(&vk, &public_inputs, &proof)
         .map_err(|e| format!("Proof verification failed: {}", e));
-    
+
     match is_valid {
         Ok(true) => {
             // Check if commitment is registered
@@ -1350,7 +1411,7 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
                     ..Default::default()
                 };
             }
-            
+
             ActionResult {
                 success: true,
                 verified: Some(true),
@@ -1358,29 +1419,25 @@ fn handle_verify_zkp(zkp_proof: ZKPProof) -> ActionResult {
                 ..Default::default()
             }
         }
-        Ok(false) => {
-            ActionResult {
-                success: false,
-                error: Some("Invalid proof".to_string()),
-                verified: Some(false),
-                ..Default::default()
-            }
-        }
-        Err(e) => {
-            ActionResult {
-                success: false,
-                error: Some(e),
-                verified: Some(false),
-                ..Default::default()
-            }
-        }
+        Ok(false) => ActionResult {
+            success: false,
+            error: Some("Invalid proof".to_string()),
+            verified: Some(false),
+            ..Default::default()
+        },
+        Err(e) => ActionResult {
+            success: false,
+            error: Some(e),
+            verified: Some(false),
+            ..Default::default()
+        },
     }
 }
 
 // Check if commitment exists
 fn handle_check_commitment(commitment: String) -> ActionResult {
     let exists = is_commitment_used(&commitment);
-    
+
     ActionResult {
         success: true,
         verified: Some(exists),
@@ -1398,15 +1455,14 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
     };
 
     // 2. Deserialize proof
-    let proof: ark_groth16::Proof<Bn254> = match CanonicalDeserialize::deserialize_compressed(&proof_bytes[..]) {
-        Ok(p) => p,
-        Err(_) => {
-            match CanonicalDeserialize::deserialize_uncompressed(&proof_bytes[..]) {
+    let proof: ark_groth16::Proof<Bn254> =
+        match CanonicalDeserialize::deserialize_compressed(&proof_bytes[..]) {
+            Ok(p) => p,
+            Err(_) => match CanonicalDeserialize::deserialize_uncompressed(&proof_bytes[..]) {
                 Ok(p) => p,
                 Err(_) => return false,
-            }
-        }
-    };
+            },
+        };
 
     // 3. Load the shared VK (hardcoded constant, same as client WASM)
     let vk = match get_cached_vk() {
@@ -1438,7 +1494,7 @@ fn verify_groth16_proof(proof_b64: &str, public_inputs: &[String]) -> bool {
 fn handle_stats() -> ActionResult {
     let identities = get_identities().lock().unwrap();
     let count = identities.len();
-    
+
     ActionResult {
         success: true,
         created_at: Some(count as u64),
@@ -1516,7 +1572,10 @@ fn handle_register_via_contract(
     ) {
         Ok(result) => Some(result.transaction_hash),
         Err(e) => {
-            eprintln!("On-chain registration failed (identity stored locally): {}", e);
+            eprintln!(
+                "On-chain registration failed (identity stored locally): {}",
+                e
+            );
             None
         }
     };
@@ -1560,12 +1619,12 @@ fn handle_prepare_writer_call(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     let commitment = {
         let input = format!("commitment:{}", account_id);
         hex::encode(compute_sha256(&input))
     };
-    
+
     let nullifier = {
         let input = format!("nullifier:{}{}", account_id, nonce);
         hex::encode(compute_sha256(&input))
@@ -1597,7 +1656,7 @@ fn handle_prepare_writer_call(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     store_identity(&commitment, &nullifier, &npub, created_at);
 
     // 6. Prepare the message for the writer contract
@@ -1608,7 +1667,7 @@ fn handle_prepare_writer_call(
         "timestamp": created_at,
         "account_hash": compute_account_hash(&account_id),
     });
-    
+
     let writer_args = serde_json::json!({
         "_message": writer_message.to_string(),
         "deadline": deadline,
@@ -1634,12 +1693,12 @@ fn handle_prepare_writer_call(
     ActionResult {
         success: true,
         npub: Some(npub),
-        nsec: Some(nsec),  // Include nsec so user can save it
+        nsec: Some(nsec), // Include nsec so user can save it
         commitment: Some(commitment),
         nullifier: Some(nullifier),
         created_at: Some(created_at),
         attestation: Some(generate_attestation()),
-        tx_payload: Some(tx_payload),  // For near-signer-tee
+        tx_payload: Some(tx_payload), // For near-signer-tee
         ..Default::default()
     }
 }
@@ -1695,10 +1754,7 @@ fn handle_register_with_zkp(
     }
 
     // Verify the Groth16 proof against the verifying key
-    let proof_verified = verify_groth16_proof(
-        &zkp_proof.proof,
-        &zkp_proof.public_inputs,
-    );
+    let proof_verified = verify_groth16_proof(&zkp_proof.proof, &zkp_proof.public_inputs);
 
     if !proof_verified {
         return ActionResult {
@@ -1747,16 +1803,14 @@ fn handle_register_with_zkp(
     // 8. Sign the transaction using NEAR private key from OutLayer secrets
     let tx_nonce = created_at * 1000;
 
-    let actions = vec![
-        serde_json::json!({
-            "FunctionCall": {
-                "method_name": "register",
-                "args": args_b64,
-                "gas": 300000000000000u64,
-                "deposit": "0",
-            }
-        })
-    ];
+    let actions = vec![serde_json::json!({
+        "FunctionCall": {
+            "method_name": "register",
+            "args": args_b64,
+            "gas": 300000000000000u64,
+            "deposit": "0",
+        }
+    })];
 
     let signed_tx = match sign_transaction_with_near_key(
         std::env::var("TEE_SIGNER_ID").unwrap_or_else(|_| "kampouse.testnet".to_string()),
@@ -1814,10 +1868,10 @@ fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
         registration.nep413_signature,
         registration.user_public_key
     );
-    
+
     // Hash the message
     let message_hash = compute_sha256(&message);
-    
+
     // Production: OutLayer provides TEE signing via attestation
     #[cfg(feature = "outlayer-tee")]
     {
@@ -1827,7 +1881,7 @@ fn sign_as_delegator(registration: &DelegatedRegistration) -> String {
         // Current: Returns hash as signature (TEE attestation provides security)
         hex::encode(&message_hash)
     }
-    
+
     // Testing: Return mock signature
     #[cfg(not(feature = "outlayer-tee"))]
     {
@@ -1843,16 +1897,18 @@ fn sign_transaction_with_near_key(
     actions: Vec<serde_json::Value>,
     signing_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    use ed25519_dalek::Signer;
     use crate::near_tx::*;
+    use ed25519_dalek::Signer;
 
     // Get private key
     let key_str = signing_key
         .or_else(|| std::env::var("NEAR_PRIVATE_KEY").ok())
         .ok_or("NEAR_PRIVATE_KEY not provided")?;
-    let key_str = key_str.strip_prefix("ed25519:")
+    let key_str = key_str
+        .strip_prefix("ed25519:")
         .ok_or("Invalid key format")?;
-    let key_bytes = bs58::decode(key_str).into_vec()
+    let key_bytes = bs58::decode(key_str)
+        .into_vec()
         .map_err(|e| format!("Key decode: {}", e))?;
     let seed: [u8; 32] = if key_bytes.len() == 64 {
         key_bytes[..32].try_into().unwrap()
@@ -1863,7 +1919,10 @@ fn sign_transaction_with_near_key(
     };
     let secret_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = secret_key.verifying_key();
-    let pub_key_b58 = format!("ed25519:{}", bs58::encode(verifying_key.as_bytes()).into_string());
+    let pub_key_b58 = format!(
+        "ed25519:{}",
+        bs58::encode(verifying_key.as_bytes()).into_string()
+    );
 
     // Fetch block hash and access key nonce
     let (block_hash, ak_nonce) = fetch_block_and_nonce(&signer_id, &pub_key_b58)?;
@@ -1873,15 +1932,29 @@ fn sign_transaction_with_near_key(
     let mut tx_actions: Vec<Action> = Vec::new();
     for action in &actions {
         if let Some(fc) = action.get("FunctionCall") {
-            let method_name = fc.get("method_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let method_name = fc
+                .get("method_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let args_b64 = fc.get("args").and_then(|v| v.as_str()).unwrap_or("");
-            let args_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, args_b64)
-                .unwrap_or_default();
-            let gas: u64 = fc.get("gas").and_then(|v| v.as_u64()).unwrap_or(300000000000000);
-            let deposit: u128 = fc.get("deposit")
-                .and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let args_bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, args_b64)
+                    .unwrap_or_default();
+            let gas: u64 = fc
+                .get("gas")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(300000000000000);
+            let deposit: u128 = fc
+                .get("deposit")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             tx_actions.push(Action::FunctionCall(FunctionCallAction {
-                method_name, args: args_bytes, gas, deposit,
+                method_name,
+                args: args_bytes,
+                gas,
+                deposit,
             }));
         }
     }
@@ -1897,8 +1970,7 @@ fn sign_transaction_with_near_key(
     };
 
     // Borsh serialize the transaction and hash it
-    let tx_bytes = borsh::to_vec(&tx)
-        .map_err(|e| format!("Tx borsh: {}", e))?;
+    let tx_bytes = borsh::to_vec(&tx).map_err(|e| format!("Tx borsh: {}", e))?;
     let tx_hash: [u8; 32] = Sha256::digest(&tx_bytes).try_into().unwrap();
     let signature = secret_key.sign(&tx_hash);
 
@@ -1908,9 +1980,9 @@ fn sign_transaction_with_near_key(
         signature: Signature::ED25519(signature.to_bytes()),
     };
 
-    let signed_bytes = borsh::to_vec(&signed_tx)
-        .map_err(|e| format!("Signed borsh: {}", e))?;
-    let borsh_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signed_bytes);
+    let signed_bytes = borsh::to_vec(&signed_tx).map_err(|e| format!("Signed borsh: {}", e))?;
+    let borsh_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signed_bytes);
 
     Ok(serde_json::json!({
         "borsh_base64": borsh_b64,
@@ -1938,10 +2010,16 @@ fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32]
     });
     let block_body = serde_json::to_string(&block_req).map_err(|e| format!("Ser: {}", e))?;
     let block_resp = fetch_rpc(&rpc_url, &block_body).map_err(|e| format!("Block RPC: {}", e))?;
-    let block_json: serde_json::Value = serde_json::from_str(&block_resp).map_err(|e| format!("Block parse: {}", e))?;
-    let hash_b58 = block_json["result"]["header"]["hash"].as_str().ok_or("No block hash")?;
-    let block_hash: [u8; 32] = bs58::decode(hash_b58).into_vec().map_err(|e| format!("Hash bs58: {}", e))?
-        .try_into().map_err(|_| "Bad hash len")?;
+    let block_json: serde_json::Value =
+        serde_json::from_str(&block_resp).map_err(|e| format!("Block parse: {}", e))?;
+    let hash_b58 = block_json["result"]["header"]["hash"]
+        .as_str()
+        .ok_or("No block hash")?;
+    let block_hash: [u8; 32] = bs58::decode(hash_b58)
+        .into_vec()
+        .map_err(|e| format!("Hash bs58: {}", e))?
+        .try_into()
+        .map_err(|_| "Bad hash len")?;
 
     // Fetch access key
     let ak_req = serde_json::json!({
@@ -1953,8 +2031,44 @@ fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32]
     });
     let ak_body = serde_json::to_string(&ak_req).map_err(|e| format!("Ser: {}", e))?;
     let ak_resp = fetch_rpc(&rpc_url, &ak_body).map_err(|e| format!("AK RPC: {}", e))?;
-    let ak_json: serde_json::Value = serde_json::from_str(&ak_resp).map_err(|e| format!("AK parse: {}", e))?;
-    let nonce: u64 = ak_json["result"]["nonce"].as_u64().ok_or("No nonce")?;
+    let ak_json: serde_json::Value =
+        serde_json::from_str(&ak_resp).map_err(|e| format!("AK parse: {}", e))?;
+
+    eprintln!("Access key RPC response: {}", ak_resp);
+
+    // Check if we got a valid result with nonce
+    let result = ak_json.get("result");
+
+    let result_obj = match result {
+        Some(r) if r.is_object() => r,
+        _ => {
+            // No valid result - key is missing
+            eprintln!("TEE relayer key not found on account {} (result: {:?})", account_id, result);
+
+            return Err(format!(
+                "TEE_RELAYER_KEY_MISSING:{}|{}|{}",
+                    account_id,
+                    public_key,
+                    hash_b58
+            ));
+        }
+    };
+
+    if result_obj["nonce"].is_null() {
+        // No valid result or nonce - key is missing
+        eprintln!("TEE relayer key not found on account {} (result: {:?})", account_id, result);
+
+        return Err(format!(
+            "TEE_RELAYER_KEY_MISSING:{}|{}|{}",
+            account_id,
+            public_key,
+            hash_b58 // Include block hash for creating transaction
+        ));
+    }
+
+    let nonce: u64 = result_obj["nonce"]
+        .as_u64()
+        .ok_or("No nonce")?;
 
     Ok((block_hash, nonce))
 }
@@ -1962,36 +2076,52 @@ fn fetch_block_and_nonce(account_id: &str, public_key: &str) -> Result<([u8; 32]
 fn fetch_block_hash() -> Result<[u8; 32], String> {
     let rpc_url = std::env::var("NEAR_RPC_URL")
         .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
-    
+
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "dontcare",
         "method": "block",
         "params": {"finality": "final"}
     });
-    
-    let body = serde_json::to_string(&request)
-        .map_err(|e| format!("Serialize error: {}", e))?;
-    
-    let response = fetch_rpc(&rpc_url, &body)
-        .map_err(|e| format!("Block hash fetch failed: {}", e))?;
-    
-    let parsed: serde_json::Value = serde_json::from_str(&response)
-        .map_err(|e| format!("Parse error: {}. Raw: {} ({} bytes)", e, &response[..200.min(response.len())], response.len()))?;
-    
-    let hash_b58 = parsed.get("result")
+
+    let body = serde_json::to_string(&request).map_err(|e| format!("Serialize error: {}", e))?;
+
+    let response =
+        fetch_rpc(&rpc_url, &body).map_err(|e| format!("Block hash fetch failed: {}", e))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&response).map_err(|e| {
+        format!(
+            "Parse error: {}. Raw: {} ({} bytes)",
+            e,
+            &response[..200.min(response.len())],
+            response.len()
+        )
+    })?;
+
+    let hash_b58 = parsed
+        .get("result")
         .and_then(|r| r.get("header"))
         .and_then(|h| h.get("hash"))
         .and_then(|h| h.as_str())
-        .ok_or_else(|| format!("No block hash in response. Keys: {:?}", parsed.as_object().map(|m| m.keys().collect::<Vec<_>>())))?;
-    
-    let hash_bytes = bs58::decode(hash_b58)
-        .into_vec()
-        .map_err(|e| format!("bs58 decode error on '{}': {}", &hash_b58[..20.min(hash_b58.len())], e))?;
-    
-    let block_hash: [u8; 32] = hash_bytes.try_into()
+        .ok_or_else(|| {
+            format!(
+                "No block hash in response. Keys: {:?}",
+                parsed.as_object().map(|m| m.keys().collect::<Vec<_>>())
+            )
+        })?;
+
+    let hash_bytes = bs58::decode(hash_b58).into_vec().map_err(|e| {
+        format!(
+            "bs58 decode error on '{}': {}",
+            &hash_b58[..20.min(hash_b58.len())],
+            e
+        )
+    })?;
+
+    let block_hash: [u8; 32] = hash_bytes
+        .try_into()
         .map_err(|_| "Block hash wrong length")?;
-    
+
     Ok(block_hash)
 }
 
@@ -2001,7 +2131,8 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
         .unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
 
     // Get borsh base64 encoded signed transaction
-    let borsh_b64 = signed_tx.get("borsh_base64")
+    let borsh_b64 = signed_tx
+        .get("borsh_base64")
         .and_then(|v| v.as_str())
         .ok_or("No borsh_base64 in signed transaction")?;
 
@@ -2026,18 +2157,21 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
 
     // Check for RPC error
     if let Some(error) = response.get("error") {
-        let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+        let msg = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
         let data = error.get("data").and_then(|d| d.as_str()).unwrap_or("");
         return Err(format!("RPC error: {} {}", msg, data));
     }
 
-    let result = response.get("result")
-        .ok_or("No result in RPC response")?;
+    let result = response.get("result").ok_or("No result in RPC response")?;
 
     // Check transaction status
     if let Some(status) = result.get("status") {
         if let Some(failure) = status.get("Failure") {
-            let error_msg = failure.get("error_message")
+            let error_msg = failure
+                .get("error_message")
                 .or_else(|| failure.get("ExecutionError"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("Transaction failed");
@@ -2050,11 +2184,13 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
                 for receipt in receipts {
                     let is_ours = receipt.get("id").and_then(|id| id.as_str()) == Some(receipt_id);
                     if is_ours {
-                        if let Some(outcome_status) = receipt.get("outcome")
+                        if let Some(outcome_status) = receipt
+                            .get("outcome")
                             .and_then(|o| o.get("status"))
-                            .and_then(|s| s.get("Failure")) 
+                            .and_then(|s| s.get("Failure"))
                         {
-                            let err = outcome_status.get("error_message")
+                            let err = outcome_status
+                                .get("error_message")
                                 .or_else(|| outcome_status.get("ExecutionError"))
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("Receipt execution failed");
@@ -2067,13 +2203,11 @@ fn submit_transaction_to_near_rpc(signed_tx: &serde_json::Value) -> Result<Strin
     }
 
     // Extract transaction hash
-    let tx_hash = result.get("transaction")
+    let tx_hash = result
+        .get("transaction")
         .and_then(|tx| tx.get("hash"))
         .and_then(|h| h.as_str())
-        .or_else(|| {
-            signed_tx.get("hash")
-                .and_then(|h| h.as_str())
-        })
+        .or_else(|| signed_tx.get("hash").and_then(|h| h.as_str()))
         .ok_or("No transaction hash in response")?;
 
     Ok(tx_hash.to_string())
@@ -2090,10 +2224,10 @@ fn outlayer_contract_call(
     {
         // OutLayer SDK provides: outlayer_near_call(contract_id, method, args, gas, deposit)
         // This allows TEE to call NEAR smart contracts as an authorized delegator
-        
-        let args_str = serde_json::to_string(&args)
-            .map_err(|e| format!("Failed to serialize args: {}", e))?;
-        
+
+        let args_str =
+            serde_json::to_string(&args).map_err(|e| format!("Failed to serialize args: {}", e))?;
+
         // OutLayer SDK Integration Point
         // When OutLayer provides NEAR contract call API, replace this with:
         //   let result = outlayer_near_call(
@@ -2110,16 +2244,20 @@ fn outlayer_contract_call(
         //
         // Current implementation returns a deterministic hash for testing
         Ok(ContractCallResult {
-            transaction_hash: format!("outlayer_tx_{}_{}", contract_id, hex::encode(compute_sha256(&args_str))),
+            transaction_hash: format!(
+                "outlayer_tx_{}_{}",
+                contract_id,
+                hex::encode(compute_sha256(&args_str))
+            ),
             result: args,
         })
     }
-    
+
     // Testing: Mock contract call for local development
     #[cfg(not(feature = "outlayer-tee"))]
     {
         let _ = (contract_id, method); // Suppress unused warnings in test builds
-        
+
         Ok(ContractCallResult {
             transaction_hash: format!("mock_tx_{}", hex::encode(compute_sha256(&args.to_string()))),
             result: args,
@@ -2140,13 +2278,13 @@ mod tests {
     #[test]
     fn test_zkp_generation() {
         initialize_zkp().unwrap();
-        
+
         let account_id = "test.near";
         let nonce = "test-nonce-123";
-        
+
         let result = generate_real_zkp(account_id, nonce, true);
         assert!(result.is_ok());
-        
+
         let zkp = result.unwrap();
         assert!(!zkp.proof.is_empty());
         assert_eq!(zkp.public_inputs.len(), 2);
@@ -2157,10 +2295,10 @@ mod tests {
     fn test_commitment_determinism() {
         let account_id = "alice.near";
         let nonce = "nonce1";
-        
+
         let zkp1 = generate_real_zkp(account_id, nonce, true).unwrap();
         let zkp2 = generate_real_zkp(account_id, nonce, true).unwrap();
-        
+
         // Same inputs should produce same commitment and nullifier
         assert_eq!(zkp1.public_inputs[0], zkp2.public_inputs[0]);
         assert_eq!(zkp1.public_inputs[1], zkp2.public_inputs[1]);
@@ -2170,7 +2308,7 @@ mod tests {
     fn test_different_accounts_different_commitments() {
         let zkp1 = generate_real_zkp("alice.near", "nonce", true).unwrap();
         let zkp2 = generate_real_zkp("bob.near", "nonce", true).unwrap();
-        
+
         // Different accounts should produce different commitments
         assert_ne!(zkp1.public_inputs[0], zkp2.public_inputs[0]);
     }
@@ -2179,18 +2317,18 @@ mod tests {
     fn test_sha256_computation() {
         let hash1 = compute_sha256("test");
         let hash2 = compute_sha256("test");
-        
+
         // Same input = same hash
         assert_eq!(hash1, hash2);
-        
+
         // Different input = different hash
         let hash3 = compute_sha256("different");
         assert_ne!(hash1, hash3);
-        
+
         // SHA256 produces 32 bytes
         assert_eq!(hash1.len(), 32);
     }
-    
+
     #[test]
     fn test_contract_call_mock_mode() {
         // Without outlayer-tee feature, should return mock transaction
@@ -2199,12 +2337,12 @@ mod tests {
             "test_method",
             serde_json::json!({"test": "value"}),
         );
-        
+
         assert!(result.is_ok());
         let tx = result.unwrap();
         assert!(tx.transaction_hash.starts_with("mock_tx_"));
     }
-    
+
     #[test]
     fn test_delegator_signature() {
         let registration = DelegatedRegistration {
@@ -2216,31 +2354,31 @@ mod tests {
             message: "test_message".to_string(),
             nonce: 1,
         };
-        
+
         let sig1 = sign_as_delegator(&registration);
         let sig2 = sign_as_delegator(&registration);
-        
+
         // Same registration = same signature
         assert_eq!(sig1, sig2);
         assert!(!sig1.is_empty());
     }
-    
+
     #[test]
     fn test_zkp_verification() {
         initialize_zkp().unwrap();
-        
+
         // Generate a proof
         let account_id = "verify_test.near";
         let nonce = "verify_nonce";
         let zkp = generate_real_zkp(account_id, nonce, true).unwrap();
-        
+
         // Verify the proof
         let result = handle_verify_zkp(zkp.clone());
-        
+
         // Should fail because commitment not registered
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not registered"));
-        
+
         // Now register the commitment
         store_identity(
             &zkp.public_inputs[0],
@@ -2248,7 +2386,7 @@ mod tests {
             "test_npub",
             zkp.timestamp,
         );
-        
+
         // Verify again - should succeed now
         let result2 = handle_verify_zkp(zkp);
         assert!(result2.success);
@@ -2263,12 +2401,12 @@ mod tests {
         let secret_bytes: [u8; 32] = [0x42; 32];
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
-        
+
         let account_id = "test-user.testnet";
         let message = "Generate Nostr identity for test-user.testnet";
         let nonce_raw: [u8; 32] = [0xab; 32];
         let recipient = "nostr-identity.near";
-        
+
         // 2. Build NEP-413 Borsh payload (what wallet signs)
         #[derive(borsh::BorshSerialize)]
         struct Nep413Payload<'a> {
@@ -2277,7 +2415,7 @@ mod tests {
             nonce: &'a [u8],
             recipient: &'a str,
         }
-        
+
         let payload = Nep413Payload {
             tag: "nep413",
             message,
@@ -2286,53 +2424,70 @@ mod tests {
         };
         let borsh_bytes = borsh::to_vec(&payload).unwrap();
         let hash = Sha256::digest(&borsh_bytes);
-        
+
         // 3. Sign (what wallet does)
         use ed25519_dalek::Signer;
         let signature = signing_key.sign(&hash);
-        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signature.to_bytes());
-        
+        let sig_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            signature.to_bytes(),
+        );
+
         // 4. Build the auth response (what frontend sends)
         let nep413_response = Nep413AuthResponse {
             account_id: account_id.to_string(),
-            public_key: format!("ed25519:{}", bs58::encode(verifying_key.as_bytes()).into_string()),
+            public_key: format!(
+                "ed25519:{}",
+                bs58::encode(verifying_key.as_bytes()).into_string()
+            ),
             signature: sig_b64,
             auth_request: Nep413AuthRequest {
                 message: message.to_string(),
-                nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &nonce_raw),
+                nonce: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &nonce_raw,
+                ),
                 recipient: recipient.to_string(),
             },
         };
-        
+
         // 5. Verify the nonce decoding works
         let decoded_nonce = base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
             &nep413_response.auth_request.nonce,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(decoded_nonce, nonce_raw.to_vec(), "Nonce base64 roundtrip");
-        
+
         // 6. Verify the Borsh payload reconstruction
+        let nonce_array: [u8; 32] = decoded_nonce
+            .as_slice()
+            .try_into()
+            .expect("Nonce must be 32 bytes");
+
         let borsh_payload = crate::Nep413BorshPayload {
-            tag: "nep413",
             message: &nep413_response.auth_request.message,
-            nonce: &decoded_nonce,
+            nonce: &nonce_array,
             recipient: &nep413_response.auth_request.recipient,
+            callback_url: None,
         };
         let reconstructed = borsh::to_vec(&borsh_payload).unwrap();
         assert_eq!(reconstructed, borsh_bytes, "Borsh payloads must match");
-        
+
         // 7. Verify signature parsing (base64)
         let parsed_sig = crate::parse_signature(&nep413_response.signature).unwrap();
         assert_eq!(parsed_sig, signature.to_bytes(), "Signature decode");
-        
+
         // 8. Verify the full hash
         let reconstructed_hash = Sha256::digest(&reconstructed);
         assert_eq!(reconstructed_hash, hash, "Hashes must match");
-        
+
         // 9. Verify signature against hash
         let sig_obj = Signature::from_bytes(signature.to_bytes().as_slice().try_into().unwrap());
-        verifying_key.verify_strict(&reconstructed_hash, &sig_obj).unwrap();
-        
+        verifying_key
+            .verify_strict(&reconstructed_hash, &sig_obj)
+            .unwrap();
+
         println!("✅ NEP-413 Borsh verification works end-to-end");
     }
 
@@ -2345,7 +2500,10 @@ mod tests {
 
         // Different accounts should produce different hashes
         let hash3 = compute_account_hash("bob.near");
-        assert_ne!(hash1, hash3, "Different accounts should produce different hashes");
+        assert_ne!(
+            hash1, hash3,
+            "Different accounts should produce different hashes"
+        );
 
         // Salted hash should differ from unsalted (proves salt is applied)
         let unsalted = hex::encode(compute_sha256(&format!("account:alice.near")));
@@ -2367,6 +2525,10 @@ mod vk_export {
         let vk = vk_lock.as_ref().unwrap();
         let mut b = Vec::new();
         vk.serialize_compressed(&mut b).unwrap();
-        eprintln!("\n\nSHARED_VK_HEX={}\nSHARED_VK_LEN={}\n\n", hex::encode(&b), b.len());
+        eprintln!(
+            "\n\nSHARED_VK_HEX={}\nSHARED_VK_LEN={}\n\n",
+            hex::encode(&b),
+            b.len()
+        );
     }
 }

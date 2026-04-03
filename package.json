@@ -19,6 +19,9 @@
     "build:packages": "pnpm --filter @nostr-identity/crypto build && pnpm --filter @nostr-identity/types build && pnpm --filter @nostr-identity/nostr build",
     "build": "pnpm build:packages && next build",
     "build:tee": "cargo build --release --target wasm32-wasip2 --features outlayer-tee",
+    "tee:deploy": "./scripts/deploy-tee.sh",
+    "tee:run": "./scripts/run-tee.sh",
+    "tee:hello": "outlayer run kampouse.near/nostr-identity-zkp-tee '{\"command\": \"hello\"}'",
     "build:contract": "cd contracts/nostr-identity-contract-zkp-tee && cargo build --target wasm32-wasip2 --release",
     "build:all": "pnpm build:contract && pnpm build",
     "start": "next start",
@@ -41,6 +44,7 @@
     "borsh": "^2.0.0",
     "bs58": "^6.0.0",
     "near-api-js": "^7.2.0",
+    "near-sign-verify": "^0.4.5",
     "next": "15",
     "react": "19",
     "react-dom": "19"
