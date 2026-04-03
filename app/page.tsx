@@ -126,8 +126,23 @@ export default function Home() {
         console.log('📥 wallet:signInAndSignMessage event received')
         console.log('  Account:', t.accounts[0].accountId)
         console.log('  Full signedMessage object:', JSON.stringify(t.accounts[0].signedMessage, null, 2))
+
+        const signedMsg = t.accounts[0].signedMessage
+        console.log('  Signed message fields:', Object.keys(signedMsg))
+        console.log('  public_key:', signedMsg.public_key || signedMsg.publicKey)
+        console.log('  signature:', (signedMsg.signature || '').substring(0, 40) + '...')
+
+        // Ensure we store the nonce for TEE
+        if (signedMsg.nonce) {
+          const nonceBytes = typeof signedMsg.nonce === 'string'
+            ? Uint8Array.from(atob(signedMsg.nonce), c => c.charCodeAt(0))
+            : signedMsg.nonce
+          setUsedNonce(nonceBytes)
+          console.log('  Stored nonce:', nonceBytes.length, 'bytes')
+        }
+
         setAccountId(t.accounts[0].accountId)
-        setSignedMessage(t.accounts[0].signedMessage)
+        setSignedMessage(signedMsg)
       })
 
       conn.on('wallet:signOut', async () => {
@@ -152,7 +167,96 @@ export default function Home() {
 
   const connectWallet = async () => {
     if (!connector) return
-    await connector.connect()
+
+    setLoading(true)
+    setError('')
+
+    try {
+      console.log('🔐 Connecting wallet...')
+      await connector.connect()
+      console.log('✅ Wallet connected')
+    } catch (err: any) {
+      console.error('❌ Wallet connection failed:', err)
+      const errorMsg = err?.message || 'Failed to connect wallet'
+      setError(errorMsg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const signNEP413 = async () => {
+    if (!connector || !accountId) {
+      setError('Please connect your wallet first')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+
+    try {
+      // Generate 32-byte nonce as Uint8Array
+      const nonceArray = crypto.getRandomValues(new Uint8Array(32))
+      const nonceBase64 = btoa(String.fromCharCode(...nonceArray))
+
+      console.log('📝 Requesting NEP-413 signature...')
+      console.log('  Account:', accountId)
+      console.log('  Message: Generate Nostr identity')
+      console.log('  Recipient: nostr-identity.kampouse.testnet')
+      console.log('  Nonce (bytes):', nonceArray.length, 'bytes')
+
+      // Try to get the wallet instance and call signMessage directly
+      const wallet = await connector.wallet()
+      console.log('  Wallet instance:', wallet)
+
+      // Check if wallet has signMessage method
+      if (typeof wallet?.signMessage === 'function') {
+        console.log('✅ Wallet supports signMessage, calling directly...')
+
+        const result = await wallet.signMessage({
+          message: 'Generate Nostr identity',
+          nonce: nonceArray,
+          recipient: 'nostr-identity.kampouse.testnet',
+        })
+
+        console.log('✅ NEP-413 signed successfully')
+        console.log('  Result keys:', Object.keys(result))
+        console.log('  Result:', JSON.stringify(result, null, 2))
+
+        // Extract fields - handle different naming conventions
+        const publicKey = result.public_key || result.publicKey || ''
+        const signature = result.signature || ''
+
+        console.log('  Extracted publicKey:', publicKey)
+        console.log('  Extracted signature:', signature.substring(0, 20) + '...')
+
+        // Store nonce for TEE
+        setUsedNonce(nonceArray)
+
+        // Manually set the signedMessage
+        setSignedMessage({
+          account_id: accountId,
+          publicKey: publicKey,
+          signature: signature,
+          authRequest: {
+            message: 'Generate Nostr identity',
+            nonce: nonceBase64,
+            recipient: 'nostr-identity.kampouse.testnet',
+          },
+        })
+      } else {
+        console.warn('⚠️ Wallet does not support signMessage method')
+        setError('Your wallet does not support message signing. Please try a different wallet.')
+      }
+    } catch (err: any) {
+      console.error('❌ NEP-413 signing failed:')
+      console.error('  Error:', err)
+      console.error('  Message:', err?.message)
+
+      const errorMsg = err?.message || 'Failed to sign message'
+      setError(`Signing failed: ${errorMsg}`)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const disconnectWallet = async () => {
@@ -275,13 +379,9 @@ export default function Home() {
       const zkp = await initZKP()
       const keypair = generateNostrKeypair()
 
-      // Get NEP-413 signature (optional - for dev/testing)
+      // Get NEP-413 signature (required for TEE verification)
       let nep413 = signedMessage
       let nonceForTee = usedNonce
-
-      if (!nep413) {
-        console.log('⚠️ No NEP-413 signature - using mock data (dev mode, TEE verification disabled)')
-      }
 
       // Ensure we have a nonce for the TEE
       if (!nonceForTee) {
@@ -289,20 +389,6 @@ export default function Home() {
         crypto.getRandomValues(nonceArray)
         nonceForTee = nonceArray
         setUsedNonce(nonceArray)
-      }
-
-      if (!nep413) {
-        // Create a mock nep413 response (TEE verification is disabled anyway)
-        nep413 = {
-          account_id: accountId,
-          public_key: 'ed25519:mock_public_key_for_dev_mode',
-          signature: 'mock_signature_for_dev_mode',
-          authRequest: {
-            message: 'Generate Nostr identity',
-            nonce: btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')),
-            recipient: 'nostr-identity.kampouse.testnet',
-          },
-        }
       }
 
       // 🔒 Privacy: Sanitize authRequest.message to remove account_id if present
@@ -446,6 +532,23 @@ export default function Home() {
       const encryptedNsec = btoa(Array.from(combined).map(b => String.fromCharCode(b)).join(''))
 
       // Step 7: Send to TEE with NEP-413 + ZKP proof
+      const nep413Response = {
+        account_id: nep413.account_id || accountId,
+        public_key: nep413.public_key || nep413.publicKey,
+        signature: nep413.signature,
+        authRequest: {
+          message: nep413.message || 'Generate Nostr identity',
+          nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce,
+          recipient: 'nostr-identity.kampouse.testnet',
+        },
+      }
+
+      console.log('📤 Sending NEP-413 to TEE:')
+      console.log('  account_id:', nep413Response.account_id)
+      console.log('  public_key:', nep413Response.public_key)
+      console.log('  signature:', nep413Response.signature.substring(0, 40) + '...')
+      console.log('  authRequest:', JSON.stringify(nep413Response.authRequest, null, 2))
+
       const data = await submitToRelayer({
         npub: keypair.publicKeyHex,
         commitment: proofResult.commitment,
@@ -459,16 +562,7 @@ export default function Home() {
           timestamp: Date.now(),
         },
         accountId: accountId,
-        nep413Response: {
-          account_id: nep413.account_id || accountId,
-          public_key: nep413.public_key || nep413.publicKey,
-          signature: nep413.signature,
-          authRequest: {
-            message: nep413.message || 'Generate Nostr identity',
-            nonce: nonceForTee ? btoa(Array.from(nonceForTee).map(b => String.fromCharCode(b)).join('')) : nep413.nonce,
-            recipient: 'nostr-identity.kampouse.testnet',
-          },
-        },
+        nep413Response,
       })
 
       if (!data.success) {
@@ -815,20 +909,71 @@ export default function Home() {
                       </button>
                     ) : (
                       <>
-                        <button
-                          onClick={generateIdentity}
-                          disabled={loading}
-                          className="flex-1 px-5 py-2.5 rounded-lg text-sm font-medium
-                            bg-[var(--accent-near)] text-black
-                            hover:bg-[var(--accent-near-hover)] transition-colors duration-200
-                            disabled:opacity-50 disabled:cursor-not-allowed
-                            flex items-center justify-center gap-2"
-                        >
-                          {loading && (
-                            <span className="w-3 h-3 border border-black/30 border-t-black rounded-full animate-spin" />
-                          )}
-                          {loading ? 'Generating...' : 'Generate identity'}
-                        </button>
+                        {!signedMessage ? (
+                          <>
+                            <button
+                              onClick={signNEP413}
+                              disabled={loading}
+                              className="flex-1 px-5 py-2.5 rounded-lg text-sm font-medium
+                                bg-[var(--accent-warning)] text-black
+                                hover:bg-[var(--accent-warning-hover)] transition-colors duration-200
+                                disabled:opacity-50 disabled:cursor-not-allowed
+                                flex items-center justify-center gap-2"
+                            >
+                              {loading ? (
+                                <>
+                                  <span className="w-3 h-3 border border-black/30 border-t-black rounded-full animate-spin" />
+                                  Signing...
+                                </>
+                              ) : (
+                                '🔏 Sign to verify account'
+                              )}
+                            </button>
+                            <button
+                              onClick={() => setShowRegisterPasskey(true)}
+                              disabled={loading}
+                              className="px-5 py-2.5 rounded-lg text-sm font-medium
+                                bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-secondary)]
+                                hover:border-[var(--accent-near)]/50 hover:text-[var(--accent-near)]
+                                transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                              title={hasPasskey ? 'You already have a passkey registered' : 'Register a passkey for login & recovery'}
+                            >
+                              {hasPasskey ? '✓ Passkey' : '✨ Register passkey'}
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={generateIdentity}
+                              disabled={loading}
+                              className="flex-1 px-5 py-2.5 rounded-lg text-sm font-medium
+                                bg-[var(--accent-near)] text-black
+                                hover:bg-[var(--accent-near-hover)] transition-colors duration-200
+                                disabled:opacity-50 disabled:cursor-not-allowed
+                                flex items-center justify-center gap-2"
+                            >
+                              {loading ? (
+                                <>
+                                  <span className="w-3 h-3 border border-black/30 border-t-black rounded-full animate-spin" />
+                                  Generating...
+                                </>
+                              ) : (
+                                'Generate identity'
+                              )}
+                            </button>
+                            <button
+                              onClick={() => setShowRegisterPasskey(true)}
+                              disabled={loading}
+                              className="px-5 py-2.5 rounded-lg text-sm font-medium
+                                bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-[var(--text-secondary)]
+                                hover:border-[var(--accent-near)]/50 hover:text-[var(--accent-near)]
+                                transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                              title={hasPasskey ? 'You already have a passkey registered' : 'Register a passkey for login & recovery'}
+                            >
+                              {hasPasskey ? '✓ Passkey' : '✨ Register passkey'}
+                            </button>
+                          </>
+                        )}
 
                         <button
                           onClick={() => setShowRegisterPasskey(true)}
