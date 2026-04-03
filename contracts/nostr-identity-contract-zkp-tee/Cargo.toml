@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-outlayer-tee = []
+outlayer-tee = ["outlayer"]
 local-test = ["minreq"]
 
 [[bin]]
@@ -21,8 +21,8 @@ name = "nostr_identity_zkp_tee"
 path = "src/lib.rs"
 
 [dependencies]
-# OutLayer storage SDK
-outlayer = "0.1"
+# OutLayer storage SDK (only for TEE builds)
+outlayer = { version = "0.1", optional = true }
 
 # Crypto
 ed25519-dalek = "2.1"

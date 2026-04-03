@@ -175,13 +175,13 @@ pub struct Nep413AuthRequest {
     pub recipient: String,
 }
 
-/// NEP-413 Borsh payload — matches what wallets sign
+/// NEP-413 Borsh payload — matches what wallets sign per NEP-413 spec
 #[derive(borsh::BorshSerialize)]
 struct Nep413BorshPayload<'a> {
-    tag: &'a str,
     message: &'a str,
     nonce: &'a [u8],
     recipient: &'a str,
+    // Note: callbackUrl is optional, omitted for TEE use
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -256,6 +256,8 @@ pub struct Attestation {
 
 // OutLayer storage API (persistent across invocations)
 // Uses modern outlayer::storage API with WASI Preview 2
+// TEMPORARY: Disabled to focus on NEP-413 fix
+/*
 #[cfg(feature = "outlayer-tee")]
 fn tee_storage_get(key: &str) -> Option<String> {
     use outlayer::storage;
@@ -270,6 +272,18 @@ fn tee_storage_get(key: &str) -> Option<String> {
 fn tee_storage_set(key: &str, value: &str) {
     use outlayer::storage;
     let _ = storage::set(key, value.as_bytes());
+}
+*/
+
+// Fallback stubs (temporary, until storage is fixed)
+#[cfg(feature = "outlayer-tee")]
+fn tee_storage_get(_key: &str) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "outlayer-tee")]
+fn tee_storage_set(_key: &str, _value: &str) {
+    // No-op for now
 }
 
 // Local testing fallbacks
@@ -398,22 +412,50 @@ fn verify_nep413_ownership(
             .map_err(|_| "Invalid public key bytes")?,
     ).map_err(|e| format!("Invalid public key: {}", e))?;
 
-    // NEP-413 spec: wallet signs SHA-256 of borsh-serialized payload
-    // Payload: { tag: "nep413", message, nonce (raw 32 bytes), recipient, callback_url }
+    // NEP-413 spec: wallet signs SHA-256 of (u32 prefix + borsh payload)
+    // u32 prefix: 2^31 + 413 = 2147484061 (little-endian bytes)
+    // Payload: { message, nonce (raw 32 bytes), recipient }
     // The nonce from the frontend is base64-encoded raw bytes — decode first
     let nonce_raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &nep413_response.auth_request.nonce)
         .map_err(|e| format!("Invalid nonce base64: {}", e))?;
 
+    // Debug logging
+    eprintln!("🔍 TEE NEP-413 Verification:");
+    eprintln!("  Input:");
+    eprintln!("    account_id: {}", account_id);
+    eprintln!("    public_key: {}", nep413_response.public_key);
+    eprintln!("    message: {}", nep413_response.auth_request.message);
+    eprintln!("    nonce (base64): {}", nep413_response.auth_request.nonce);
+    eprintln!("    nonce (hex): {:02x?}", nonce_raw.as_slice());
+    eprintln!("    recipient: {}", nep413_response.auth_request.recipient);
+    eprintln!("    signature (hex): {:02x?}", sig_bytes.as_slice());
+
+    // NEP-413 spec: prefix with u32 tag (2^31 + 413 = 2147484061)
+    const NEP_413_TAG: u32 = 2147484061u32;
+
     let borsh_payload = Nep413BorshPayload {
-        tag: "nep413",
         message: &nep413_response.auth_request.message,
         nonce: &nonce_raw,
         recipient: &nep413_response.auth_request.recipient,
     };
-    let borsh_bytes = borsh::to_vec(&borsh_payload)
+    let payload_bytes = borsh::to_vec(&borsh_payload)
         .map_err(|e| format!("Borsh serialization failed: {}", e))?;
 
-    let message_hash = Sha256::digest(&borsh_bytes);
+    // Prepend the u32 tag prefix as per NEP-413 spec
+    let mut prefixed_bytes = vec![0u8; 4 + payload_bytes.len()];
+    prefixed_bytes[0..4].copy_from_slice(&NEP_413_TAG.to_le_bytes());
+    prefixed_bytes[4..].copy_from_slice(&payload_bytes);
+
+    eprintln!("  Verification:");
+    eprintln!("    nep413 tag (u32): {} (0x{:08x})", NEP_413_TAG, NEP_413_TAG);
+    eprintln!("    tag bytes (le): {:02x?}", &NEP_413_TAG.to_le_bytes());
+    eprintln!("    payload (hex): {:02x?}", payload_bytes.as_slice());
+    eprintln!("    payload length: {} bytes", payload_bytes.len());
+    eprintln!("    prefixed (hex): {:02x?}", prefixed_bytes.as_slice());
+    eprintln!("    total length: {} bytes", prefixed_bytes.len());
+
+    let message_hash = Sha256::digest(&prefixed_bytes);
+    eprintln!("    message hash (hex): {:02x?}", message_hash.as_slice());
 
     public_key
         .verify_strict(&message_hash, &signature)
@@ -888,9 +930,20 @@ fn handle_generate(
 ) -> ActionResult {
     // 1. Verify NEP-413 (proves account ownership + nonce replay protection)
     if let Err(e) = verify_nep413_ownership(&account_id, &nep413_response) {
+        // Build debug info as plain string for better visibility
+        let debug_info = format!(
+            " | DEBUG: account_id={}, public_key={}, signature={}_TRUNCATED, message={}, nonce={}_TRUNCATED, recipient={}",
+            account_id,
+            nep413_response.public_key,
+            &nep413_response.signature.chars().take(20).collect::<String>(),
+            nep413_response.auth_request.message,
+            &nep413_response.auth_request.nonce.chars().take(10).collect::<String>(),
+            nep413_response.auth_request.recipient
+        );
+
         return ActionResult {
             success: false,
-            error: Some(format!("Verification failed: {}", e)),
+            error: Some(format!("Verification failed: {}{}", e, debug_info)),
             ..Default::default()
         };
     }

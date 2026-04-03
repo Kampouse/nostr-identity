@@ -194,45 +194,42 @@ export default function Home() {
     setError('')
 
     try {
-      // Generate 32-byte nonce as Uint8Array
+      // Generate 32-byte nonce
       const nonceArray = crypto.getRandomValues(new Uint8Array(32))
       const nonceBase64 = btoa(String.fromCharCode(...nonceArray))
 
       console.log('📝 Requesting NEP-413 signature...')
       console.log('  Account:', accountId)
-      console.log('  Message: Generate Nostr identity')
-      console.log('  Recipient: nostr-identity.kampouse.testnet')
-      console.log('  Nonce (bytes):', nonceArray.length, 'bytes')
 
-      // Try to get the wallet instance and call signMessage directly
+      // Get wallet instance
       const wallet = await connector.wallet()
-      console.log('  Wallet instance:', wallet)
 
       // Check if wallet has signMessage method
       if (typeof wallet?.signMessage === 'function') {
-        console.log('✅ Wallet supports signMessage, calling directly...')
+        console.log('✅ Wallet has signMessage method')
 
+        // Try the standard NEP-413 format first (what NEAR wallets expect)
         const result = await wallet.signMessage({
           message: 'Generate Nostr identity',
           nonce: nonceArray,
           recipient: 'nostr-identity.kampouse.testnet',
         })
 
-        console.log('✅ NEP-413 signed successfully')
+        console.log('✅ Wallet signed successfully')
         console.log('  Result keys:', Object.keys(result))
-        console.log('  Result:', JSON.stringify(result, null, 2))
+        console.log('  Full result:', JSON.stringify(result, null, 2))
 
-        // Extract fields - handle different naming conventions
+        // Extract fields with different naming conventions
         const publicKey = result.public_key || result.publicKey || ''
         const signature = result.signature || ''
 
         console.log('  Extracted publicKey:', publicKey)
-        console.log('  Extracted signature:', signature.substring(0, 20) + '...')
+        console.log('  Extracted signature (first 40):', signature.substring(0, 40))
 
         // Store nonce for TEE
         setUsedNonce(nonceArray)
 
-        // Manually set the signedMessage
+        // Set the signedMessage - the wallet already did NEP-413 signing correctly
         setSignedMessage({
           account_id: accountId,
           publicKey: publicKey,
@@ -243,14 +240,18 @@ export default function Home() {
             recipient: 'nostr-identity.kampouse.testnet',
           },
         })
+
+        console.log('✅ NEP-413 signature complete')
       } else {
         console.warn('⚠️ Wallet does not support signMessage method')
-        setError('Your wallet does not support message signing. Please try a different wallet.')
+        setError('Your wallet does not support message signing')
       }
     } catch (err: any) {
       console.error('❌ NEP-413 signing failed:')
       console.error('  Error:', err)
+      console.error('  Type:', err.constructor?.name)
       console.error('  Message:', err?.message)
+      console.error('  Stack:', err?.stack)
 
       const errorMsg = err?.message || 'Failed to sign message'
       setError(`Signing failed: ${errorMsg}`)
